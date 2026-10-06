@@ -43,6 +43,7 @@ def initialize_database():
 
             CREATE TABLE IF NOT EXISTS books (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_number TEXT NOT NULL UNIQUE,
                 barcode TEXT NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 author TEXT NOT NULL,
@@ -60,6 +61,8 @@ def initialize_database():
                 book_id INTEGER NOT NULL REFERENCES books(id),
                 borrower_id INTEGER NOT NULL REFERENCES users(id),
                 processed_by INTEGER NOT NULL REFERENCES users(id),
+                barcode TEXT NOT NULL DEFAULT '',
+                institutional_email TEXT NOT NULL DEFAULT '',
                 borrow_date TEXT NOT NULL,
                 due_date TEXT NOT NULL,
                 return_date TEXT,
@@ -87,6 +90,43 @@ def initialize_database():
         book_columns = {row["name"] for row in connection.execute("PRAGMA table_info(books)")}
         if "cover_image" not in book_columns:
             connection.execute("ALTER TABLE books ADD COLUMN cover_image TEXT NOT NULL DEFAULT ''")
+        if "book_number" not in book_columns:
+            connection.execute("ALTER TABLE books ADD COLUMN book_number TEXT NOT NULL DEFAULT ''")
+            legacy_books = connection.execute("SELECT id, barcode FROM books ORDER BY id").fetchall()
+            for book in legacy_books:
+                book_number = book["barcode"]
+                barcode = f"SL{book['id']:010d}"
+                suffix = 1
+                while connection.execute(
+                    "SELECT 1 FROM books WHERE barcode = ? AND id != ?", (barcode, book["id"])
+                ).fetchone():
+                    barcode = f"SL{book['id']:08d}{suffix:02d}"
+                    suffix += 1
+                connection.execute(
+                    "UPDATE books SET book_number = ?, barcode = ? WHERE id = ?",
+                    (book_number, barcode, book["id"]),
+                )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS books_book_number_unique ON books(book_number)"
+        )
+
+        transaction_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(book_transactions)")
+        }
+        if "barcode" not in transaction_columns:
+            connection.execute("ALTER TABLE book_transactions ADD COLUMN barcode TEXT NOT NULL DEFAULT ''")
+            connection.execute(
+                """UPDATE book_transactions
+                   SET barcode = (SELECT barcode FROM books WHERE books.id = book_transactions.book_id)"""
+            )
+        if "institutional_email" not in transaction_columns:
+            connection.execute(
+                "ALTER TABLE book_transactions ADD COLUMN institutional_email TEXT NOT NULL DEFAULT ''"
+            )
+            connection.execute(
+                """UPDATE book_transactions
+                   SET institutional_email = (SELECT email FROM users WHERE users.id = book_transactions.borrower_id)"""
+            )
 
         user_columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
         for column, definition in (
@@ -132,7 +172,10 @@ def initialize_database():
             ]
             connection.executemany(
                 """INSERT INTO books
-                   (barcode, title, author, category, published_date, quantity, available_quantity)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                [(*book, book[-1]) for book in books],
+                   (book_number, barcode, title, author, category, published_date, quantity, available_quantity)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (book[0], f"SL{index:010d}", *book[1:], book[-1])
+                    for index, book in enumerate(books, start=1)
+                ],
             )

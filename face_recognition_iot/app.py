@@ -76,6 +76,7 @@ def camera_worker():
         no_face_since = None
         frame_number = 0
         next_sync = 0.0
+        camera_was_unavailable = False
         update_state(camera_status="active", message="Camera ready. Select Time-in or Time-out.")
 
         while not STOP_EVENT.is_set():
@@ -91,9 +92,17 @@ def camera_worker():
 
             frame = camera.read()
             if frame is None:
-                update_state(camera_status="camera_error", message="The camera stopped returning frames.")
+                if not camera_was_unavailable:
+                    update_state(
+                        camera_status="camera_error",
+                        message="The camera stopped returning frames. Attempting to reconnect...",
+                    )
+                    camera_was_unavailable = True
                 time.sleep(0.1)
                 continue
+            if camera_was_unavailable:
+                update_state(camera_status="active", message="Camera reconnected. Select Time-in or Time-out.")
+                camera_was_unavailable = False
 
             frame_number += 1
             faces = recognizer.detector.detect(frame)

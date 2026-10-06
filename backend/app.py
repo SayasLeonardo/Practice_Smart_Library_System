@@ -12,7 +12,7 @@ from functools import wraps
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory, session
+from flask import Flask, Response, abort, g, jsonify, redirect, request, send_from_directory, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from database import DATABASE_PATH, get_connection, initialize_database
@@ -113,9 +113,9 @@ def transaction_rows(search="", date_from="", date_to=""):
         raise ValueError("The start date must not be after the end date.")
 
     sql = """
-        SELECT t.id, t.book_id, t.borrower_id, b.barcode, b.title,
+        SELECT t.id, t.book_id, t.borrower_id, b.book_number, t.barcode, b.title,
                u.school_id AS borrower_school_id, u.name AS borrower_name,
-               u.department AS borrower_department, u.email AS borrower_email,
+               u.department AS borrower_department, t.institutional_email AS borrower_email,
                staff.name AS processed_by, t.borrow_date, t.due_date, t.return_date,
                t.status,
             CASE WHEN t.status = 'borrowed' AND t.due_date < ?
@@ -124,10 +124,10 @@ def transaction_rows(search="", date_from="", date_to=""):
         JOIN books b ON b.id = t.book_id
         JOIN users u ON u.id = t.borrower_id
         JOIN users staff ON staff.id = t.processed_by
-        WHERE (b.title LIKE ? OR b.barcode LIKE ? OR u.name LIKE ? OR u.school_id LIKE ?)
+        WHERE (b.title LIKE ? OR b.book_number LIKE ? OR b.barcode LIKE ? OR u.name LIKE ? OR u.school_id LIKE ?)
     """
     search_term = f"%{search}%"
-    parameters = [manila_now()[:10], search_term, search_term, search_term, search_term]
+    parameters = [manila_now()[:10], search_term, search_term, search_term, search_term, search_term]
     if date_from and date_to:
         sql += " AND ((date(t.borrow_date) BETWEEN ? AND ?) OR (date(t.return_date) BETWEEN ? AND ?))"
         parameters.extend([date_from, date_to, date_from, date_to])
@@ -263,14 +263,69 @@ def list_books():
     search = f"%{request.args.get('q', '').strip()}%"
     with get_connection() as connection:
         rows = connection.execute(
-            """SELECT id, barcode, title, author, category, published_date, cover_image,
+            """SELECT id, book_number, barcode, title, author, category, published_date, cover_image,
                       quantity, available_quantity,
                       CASE WHEN available_quantity > 0 THEN 'Available' ELSE 'Not Available' END AS status
-               FROM books WHERE status = 'active' AND (barcode LIKE ? OR title LIKE ? OR author LIKE ? OR category LIKE ?)
+               FROM books WHERE status = 'active'
+                 AND (book_number LIKE ? OR barcode LIKE ? OR title LIKE ? OR author LIKE ? OR category LIKE ?)
                ORDER BY title COLLATE NOCASE""",
-            (search, search, search, search),
+            (search, search, search, search, search),
         ).fetchall()
     return jsonify({"books": [dict(row) for row in rows]})
+
+
+@app.get("/api/books/barcode")
+@login_required
+def find_book_by_barcode():
+    barcode = request.args.get("value", "").strip()
+    if not barcode:
+        return api_error("Enter or scan a barcode.")
+    with get_connection() as connection:
+        book = connection.execute(
+            """SELECT id, book_number, barcode, title, author, category, published_date,
+                      quantity, available_quantity,
+                      CASE WHEN available_quantity > 0 THEN 'Available' ELSE 'Not Available' END AS status
+               FROM books WHERE barcode = ? AND status = 'active'""",
+            (barcode,),
+        ).fetchone()
+    if not book:
+        return api_error("Book not found.", 404)
+    return jsonify({"book": dict(book)})
+
+
+@app.get("/api/books/barcode-image")
+@login_required
+def render_book_barcode():
+    barcode_value = request.args.get("value", "").strip()
+    if not barcode_value or len(barcode_value) > 50:
+        return api_error("Enter a valid barcode.")
+    from barcode import Code128
+    from barcode.writer import SVGWriter
+
+    image = Code128(barcode_value, writer=SVGWriter()).render(
+        writer_options={
+            "module_width": 0.28,
+            "module_height": 12,
+            "quiet_zone": 2,
+            "font_size": 9,
+            "text_distance": 2,
+        }
+    )
+    return Response(image, content_type="image/svg+xml")
+
+
+@app.post("/api/books/generate-barcode")
+@roles_required("MIS Admin", "Librarian")
+def generate_book_barcode():
+    with get_connection() as connection:
+        for _ in range(10):
+            barcode_value = "SL" + secrets.token_hex(6).upper()
+            exists = connection.execute(
+                "SELECT 1 FROM books WHERE barcode = ?", (barcode_value,)
+            ).fetchone()
+            if not exists:
+                return jsonify({"barcode": barcode_value})
+    return api_error("Unable to generate a unique barcode. Please try again.", 503)
 
 
 def cover_extension(image_data):
@@ -355,6 +410,7 @@ def reset_book_cover(book_id):
 def create_book():
     data = request.get_json(silent=True) or {}
     try:
+        book_number = clean_text(data, "book_number", 50)
         barcode = clean_text(data, "barcode", 50)
         title = clean_text(data, "title")
         author = clean_text(data, "author")
@@ -369,12 +425,15 @@ def create_book():
         with get_connection() as connection:
             cursor = connection.execute(
                 """INSERT INTO books
-                   (barcode, title, author, category, published_date, quantity, available_quantity)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (barcode, title, author, category, published_date, quantity, quantity),
+                   (book_number, barcode, title, author, category, published_date, quantity, available_quantity)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (book_number, barcode, title, author, category, published_date, quantity, quantity),
             )
         return jsonify({"id": cursor.lastrowid, "message": "Book added."}), 201
     except sqlite3.IntegrityError:
+        with get_connection() as connection:
+            if connection.execute("SELECT 1 FROM books WHERE barcode = ?", (data.get("barcode"),)).fetchone():
+                return api_error("This barcode is already assigned to another book.", 409)
         return api_error("That book number is already in use.", 409)
 
 
@@ -382,14 +441,14 @@ def create_book():
 @roles_required("MIS Admin", "Librarian")
 def update_book(book_id):
     data = request.get_json(silent=True) or {}
-    allowed_fields = {"barcode", "title", "author", "category", "published_date", "quantity"}
+    allowed_fields = {"book_number", "barcode", "title", "author", "category", "published_date", "quantity"}
     values = {key: data[key] for key in allowed_fields if key in data}
     if not values:
         return api_error("No book details were provided.")
     try:
-        for field in ("barcode", "title", "author", "category"):
+        for field in ("book_number", "barcode", "title", "author", "category"):
             if field in values:
-                values[field] = clean_text(values, field, 200 if field != "barcode" else 50)
+                values[field] = clean_text(values, field, 50 if field in ("book_number", "barcode") else 200)
         if "quantity" in values:
             new_quantity = int(values["quantity"])
             with get_connection() as connection:
@@ -410,6 +469,11 @@ def update_book(book_id):
     except (ValueError, TypeError) as error:
         return api_error(str(error))
     except sqlite3.IntegrityError:
+        if "barcode" in values:
+            with get_connection() as connection:
+                if connection.execute("SELECT 1 FROM books WHERE barcode = ? AND id != ?",
+                                      (values["barcode"], book_id)).fetchone():
+                    return api_error("This barcode is already assigned to another book.", 409)
         return api_error("That book number is already in use.", 409)
 
 
@@ -462,32 +526,54 @@ def borrow_book():
     try:
         book_id = int(data.get("book_id", 0))
         school_id = clean_text(data, "borrower_school_id", 50)
+        barcode = str(data.get("barcode", "")).strip()
+        institutional_email = str(data.get("institutional_email", "")).strip()
         due_date = str(data.get("due_date") or (datetime.now(MANILA_TIME).date() + timedelta(days=14)).isoformat())
         date.fromisoformat(due_date)
     except (ValueError, TypeError):
         return api_error("Choose a valid book, borrower school ID, and due date.")
+    if institutional_email and (
+        len(institutional_email) > 254
+        or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", institutional_email)
+    ):
+        return api_error("Enter a valid institutional email address.")
+    if not institutional_email:
+        institutional_email = None
 
     try:
         with get_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            book = connection.execute("SELECT id, available_quantity FROM books WHERE id = ?", (book_id,)).fetchone()
+            if barcode:
+                book = connection.execute(
+                    "SELECT id, barcode, available_quantity FROM books WHERE barcode = ? AND status = 'active'",
+                    (barcode,),
+                ).fetchone()
+                if book_id and book and book["id"] != book_id:
+                    return api_error("The scanned barcode does not match the selected book.", 409)
+            else:
+                book = connection.execute(
+                    "SELECT id, barcode, available_quantity FROM books WHERE id = ? AND status = 'active'",
+                    (book_id,),
+                ).fetchone()
             borrower = connection.execute(
-                "SELECT id FROM users WHERE school_id = ? AND status = 'active' AND role IN ('Student', 'Faculty')",
+                "SELECT id, email FROM users WHERE school_id = ? AND status = 'active' AND role IN ('Student', 'Faculty')",
                 (school_id,),
             ).fetchone()
             if not book:
                 return api_error("Book not found.", 404)
             if not borrower:
                 return api_error("No active student or faculty member has that school ID.", 404)
+            if not institutional_email:
+                institutional_email = borrower["email"]
             if book["available_quantity"] < 1:
                 return api_error("There are no available copies of this book.", 409)
             connection.execute(
                 """INSERT INTO book_transactions
-                   (book_id, borrower_id, processed_by, borrow_date, due_date)
-                   VALUES (?, ?, ?, datetime('now', 'localtime'), ?)""",
-                (book_id, borrower["id"], g.user["id"], due_date),
+                   (book_id, borrower_id, processed_by, barcode, institutional_email, borrow_date, due_date)
+                   VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'), ?)""",
+                (book["id"], borrower["id"], g.user["id"], book["barcode"], institutional_email, due_date),
             )
-            connection.execute("UPDATE books SET available_quantity = available_quantity - 1 WHERE id = ?", (book_id,))
+            connection.execute("UPDATE books SET available_quantity = available_quantity - 1 WHERE id = ?", (book["id"],))
         return jsonify({"message": "Book borrowed."}), 201
     except sqlite3.IntegrityError:
         return api_error("Unable to create the transaction.", 409)

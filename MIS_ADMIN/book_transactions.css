@@ -174,6 +174,21 @@ h1 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -.02em; color
   color: var(--ink);
 }
 .search-box input::placeholder { color: #7B8E83; }
+.search-box { width: min(520px, 100%); }
+.search-box input { min-width: 100px; }
+.scan-search-button,
+.barcode-actions button {
+  border: 1px solid #224332;
+  border-radius: 4px;
+  background: #e7f1e8;
+  color: #1e3f2e;
+  padding: 7px 9px;
+  font: 600 11px Arial, sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.scan-search-button:hover,
+.barcode-actions button:hover { background: #d5e8d8; }
 
 /* ---------- 5. Outer Stage Frame ---------- */
 .stage {
@@ -303,6 +318,11 @@ h1 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -.02em; color
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
 .form-group { display: flex; flex-direction: column; gap: 3px; }
 .form-group.full-width { margin-bottom: 8px; }
+.barcode-field input { width: 100%; }
+.barcode-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.book-barcode-image { display: block; max-width: 100%; width: 360px; height: auto; margin: 8px auto 2px; }
+.book-barcode-image[hidden],
+.barcode-actions button[hidden] { display: none; }
 .form-group label { font-size: 11px; font-weight: 700; color: #000; }
 .form-group input {
   background: #D9D9D9;
@@ -362,4 +382,6 @@ h1 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -.02em; color
   .modal { width: calc(100% - 24px); max-height: calc(100vh - 24px); overflow-y: auto; }
   .modal-grid { grid-template-columns: 1fr; }
   .book-cover img { max-width: 180px; display: block; margin: 0 auto; }
+  .search-box { width: 100%; }
+  .scan-search-button { padding: 6px; }
 }

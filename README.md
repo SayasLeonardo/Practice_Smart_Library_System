@@ -64,6 +64,7 @@ In each PowerShell terminal, press **Ctrl+C**. Stop the camera station first, th
 
 - **Station cannot connect to the library API:** Check that terminal 1 is still running and that `SMART_LIBRARY_API_URL` is `http://127.0.0.1:5000`. Make sure both terminals have the identical `SMART_LIBRARY_IOT_KEY`.
 - **Camera is unavailable:** Close other apps using the camera and allow camera access in Windows privacy settings. The station uses camera device `0` by default; to select another device, set `$env:SMART_LIBRARY_CAMERA = "1"` (or the desired device index) in terminal 2 before starting the station.
+- **Camera stopped returning frames:** The station now retries the camera connection automatically. Wait a few seconds for it to reconnect; if it does not, close other apps using the camera, verify Windows camera permissions and the `SMART_LIBRARY_CAMERA` device index, then restart the station.
 - **Models fail to download:** Check the internet connection, then restart the camera station. The model files are downloaded on startup when missing or incomplete.
 - **PowerShell says the address is already in use:** Another copy is likely running. Stop it with **Ctrl+C** in its terminal before starting another copy.
 
@@ -85,3 +86,23 @@ MIS Admin and Librarian accounts can use the dashboard, book catalog, borrowing/
 ## Face Recognition / IoT
 
 The main backend stores attendance sessions and face-registration metadata; use `/api/attendance/time-in` and `/api/attendance/time-out` through the camera client. See `face_recognition_iot/README.md` for its independent dependencies, models, and camera configuration. Camera frames and downloaded embeddings stay in memory; the main service stores compact face encodings and the uploaded registration image.
+
+## Book barcodes and borrowing
+
+The Book Transactions screens support USB barcode scanners that act like a keyboard: select **Scan Barcode**, scan the label, and press Enter if the scanner does not send Enter automatically. You can also type or paste barcode values. Add Book has separate **Book Number** and **Barcode** values; use **Generate Barcode** when no physical barcode exists. The generated Code 128 barcode can be previewed and printed from the form.
+
+On first startup after this update, the backend migrates the existing SQLite database in place. Existing book numbers are copied into `books.book_number`, unique barcode values are assigned to those rows, and existing transactions receive barcode and borrower-email snapshots. No manual SQL is required. The new database fields are:
+
+- `books.book_number` — unique catalog number, preserving the legacy value previously held in `books.barcode`.
+- `books.barcode` — unique physical/generated barcode used for lookup and borrowing.
+- `book_transactions.barcode` and `book_transactions.institutional_email` — values captured when a book is borrowed.
+
+To install the barcode renderer with the other backend dependencies, rerun `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`, then start the backend normally. Existing book and transaction IDs and relationships are retained.
+
+### Barcode and institutional-email checks
+
+1. Sign in as MIS Admin or Librarian and open **Book Transactions**.
+2. Choose **ADD BOOK**, enter the regular book details, then scan into the Barcode field or enter it manually. Use **Generate Barcode** to create a unique Code 128 label; preview it on screen and choose **Print Barcode** to print.
+3. Enter a barcode already used by another book and save (or scan it into the field). The form reports that the barcode is already assigned.
+4. In the page search box, choose **Scan Barcode**, scan a registered book, and press Enter. The book information opens; an unknown code reports **Book not found**.
+5. Choose **Borrow** on a book. Scan or enter the borrower's School ID and press Enter to retrieve the registered name, program, and institutional email. Scan or enter the book barcode, check its availability, then confirm the due date. The transaction stores the email and barcode snapshots and updates available copies.

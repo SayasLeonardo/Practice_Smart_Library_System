@@ -97,7 +97,7 @@
     }
   }
 
-  function showDialog(title, fields, message, submitLabel, onSubmit) {
+  function showDialog(title, fields, message, submitLabel, onSubmit, onReady) {
     const dialog = document.createElement("dialog");
     dialog.className = "api-dialog";
     const inputMarkup = fields.map(function (field) {
@@ -110,7 +110,8 @@
       } else {
         control = '<input name="' + escapeHtml(field.name) + '" type="' + escapeHtml(field.type || "text") +
           '" value="' + escapeHtml(field.value || "") + '"' + (field.required ? " required" : "") +
-          (field.placeholder ? ' placeholder="' + escapeHtml(field.placeholder) + '"' : "") + ">";
+          (field.placeholder ? ' placeholder="' + escapeHtml(field.placeholder) + '"' : "") +
+          (field.readonly ? " readonly" : "") + ">";
       }
       return '<div class="dialog-field"><label>' + escapeHtml(field.label) + control + "</label></div>";
     }).join("");
@@ -127,6 +128,7 @@
       dialog.close();
       Promise.resolve(onSubmit(values)).catch(function (error) { notify(error.message, true); });
     });
+    if (onReady) onReady(dialog);
     dialog.showModal();
   }
 
@@ -263,7 +265,7 @@
   function bookFields() {
     const result = {};
     const names = {
-      "book number": "barcode", "book title": "title", "author name": "author",
+      "book number": "book_number", "barcode": "barcode", "book title": "title", "author name": "author",
       "category": "category", "date published": "published_date", "book count": "quantity", "status": "status"
     };
     document.querySelectorAll("#bookModal .form-group").forEach(function (group) {
@@ -302,6 +304,7 @@
       fields[key].value = book ? (book[key] == null ? "" : book[key]) : "";
       fields[key].readOnly = key === "status" || (!addingBook && key !== "status");
     });
+    updateBarcodePreview(book ? book.barcode : "");
     const activeTransactions = book ? transactions.filter(function (item) {
       return item.book_id === book.id && item.status === "borrowed";
     }) : [];
@@ -334,7 +337,7 @@
       const borrowed = transactions.filter(function (item) { return item.book_id === book.id && item.status === "borrowed"; });
       const borrowerNames = borrowed.map(function (item) { return item.borrower_name; }).join(", ");
       return '<tr data-book-id="' + book.id + '">' +
-        '<td class="code">' + escapeHtml(book.barcode) + '</td>' +
+        '<td class="code">' + escapeHtml(book.book_number) + '<br><small>Barcode: ' + escapeHtml(book.barcode) + '</small></td>' +
         '<td>' + escapeHtml(book.category) + '</td>' +
         '<td class="bold">' + escapeHtml(book.title) + '</td>' +
         '<td>' + escapeHtml(book.author) + '</td>' +
@@ -363,8 +366,16 @@
     const dueDate = new Date();
     dueDate.setDate(dueDate.getDate() + 14);
     showDialog("Borrow Book", [
-      { name: "borrower_school_id", label: "Borrower school ID", required: true },
-      { name: "due_date", label: "Due date", type: "date", value: dueDate.toISOString().slice(0, 10), required: true }
+      { name: "borrower_school_id", label: "School ID", required: true, value: "" },
+      { name: "institutional_email", label: "Institutional Email", type: "email", required: true, value: "" },
+      { name: "borrower_name", label: "Borrower's Name", readonly: true, value: "" },
+      { name: "borrower_department", label: "Course / Program", readonly: true, value: "" },
+      { name: "book_number", label: "Book Number", readonly: true, value: book.book_number },
+      { name: "book_title", label: "Book Title", readonly: true, value: book.title },
+      { name: "barcode", label: "Barcode (scan or enter)", required: true, value: book.barcode },
+      { name: "availability", label: "Availability", readonly: true, value: book.status },
+      { name: "borrow_date", label: "Borrow Date", readonly: true, value: new Date().toISOString().slice(0, 10) },
+      { name: "due_date", label: "Due Date", type: "date", value: dueDate.toISOString().slice(0, 10), required: true }
     ], book.title, "Confirm Borrow", async function (values) {
       const matches = await request("/borrowers?q=" + encodeURIComponent(values.borrower_school_id.trim()));
       const borrower = matches.borrowers.find(function (item) {
@@ -373,11 +384,99 @@
       if (!borrower) throw new Error("No active student or faculty member has that school ID.");
       await request("/transactions/borrow", {
         method: "POST",
-        body: JSON.stringify({ book_id: book.id, borrower_school_id: borrower.school_id, due_date: values.due_date })
+        body: JSON.stringify({
+          borrower_school_id: borrower.school_id,
+          institutional_email: values.institutional_email.trim(),
+          barcode: values.barcode.trim(),
+          due_date: values.due_date
+        })
       });
       notify("Book borrowed for " + borrower.name + ".");
       await refreshBooks(document.querySelector(".search-box input")?.value || "");
+    }, function (dialog) {
+      const form = dialog.querySelector("form");
+      const context = dialog.querySelector("p");
+      const schoolId = form.elements.borrower_school_id;
+      const barcodeInput = form.elements.barcode;
+      async function loadBorrower() {
+        const schoolIdValue = schoolId.value.trim();
+        if (!schoolIdValue) return;
+        const matches = await request("/borrowers?q=" + encodeURIComponent(schoolIdValue));
+        const borrower = matches.borrowers.find(function (item) {
+          return item.school_id.toLowerCase() === schoolIdValue.toLowerCase();
+        });
+        if (!borrower) throw new Error("No active student or faculty member has that school ID.");
+        form.elements.institutional_email.value = borrower.email;
+        form.elements.borrower_name.value = borrower.name;
+        form.elements.borrower_department.value = borrower.department;
+        if (context) context.textContent = "Borrower: " + borrower.name + " · " + borrower.department;
+      }
+      schoolId.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        loadBorrower().catch(function (error) { notify(error.message, true); });
+      });
+      barcodeInput.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        request("/books/barcode?value=" + encodeURIComponent(barcodeInput.value.trim())).then(function (result) {
+          form.elements.book_number.value = result.book.book_number;
+          form.elements.book_title.value = result.book.title;
+          form.elements.availability.value = result.book.status + " (" + result.book.available_quantity + " available)";
+          if (context) context.textContent = "Book: " + result.book.title + " · " + result.book.author +
+            " · " + result.book.book_number + " · " + result.book.status;
+          if (result.book.available_quantity < 1) notify("There are no available copies of this book.", true);
+        }).catch(function (error) { notify(error.message, true); });
+      });
     });
+  }
+
+  function updateBarcodePreview(value) {
+    const image = document.getElementById("bookBarcodeImage");
+    const printButton = document.getElementById("printBarcodeButton");
+    if (!image || !printButton) return;
+    if (!value) {
+      image.hidden = true;
+      printButton.hidden = true;
+      image.removeAttribute("src");
+      return;
+    }
+    image.src = API + "/books/barcode-image?value=" + encodeURIComponent(value);
+    image.alt = "Barcode " + value;
+    image.hidden = false;
+    printButton.hidden = false;
+  }
+
+  async function verifyScannedBarcode(input) {
+    const value = input.value.trim();
+    if (!value) return;
+    try {
+      const result = await request("/books/barcode?value=" + encodeURIComponent(value));
+      if (addingBook || (activeBook && result.book.id !== activeBook.id)) {
+        throw new Error("This barcode is already assigned to another book.");
+      }
+      updateBarcodePreview(value);
+      notify("Barcode scanned and verified.");
+    } catch (error) {
+      if (error.message === "Book not found.") {
+        updateBarcodePreview(value);
+        notify("Barcode scanned. It is available to assign.");
+      } else {
+        notify(error.message, true);
+      }
+    }
+  }
+
+  function printBarcode() {
+    const image = document.getElementById("bookBarcodeImage");
+    if (!image || image.hidden) return;
+    const printWindow = window.open("", "_blank", "width=420,height=260");
+    if (!printWindow) return notify("Allow pop-ups to print the barcode.", true);
+    printWindow.document.write("<!doctype html><html><head><title>Book Barcode</title>" +
+      "<style>body{font:14px Arial,sans-serif;text-align:center;padding:24px}img{max-width:100%;height:auto}</style>" +
+      "</head><body><img src=\"" + escapeHtml(image.src) + "\" alt=\"" + escapeHtml(image.alt) + "\">" +
+      "<script>window.onload=function(){window.print()}<\/script></body></html>");
+    printWindow.document.close();
   }
 
   async function returnBook(book) {
@@ -401,6 +500,19 @@
     const search = document.querySelector(".search-box input");
     if (search) search.addEventListener("input", function () {
       refreshBooks(search.value).catch(function (error) { notify(error.message, true); });
+    });
+    const scanSearchButton = document.getElementById("scanBookButton");
+    if (scanSearchButton && search) scanSearchButton.addEventListener("click", function () {
+      search.focus();
+      notify("Scan a book barcode with the USB scanner, then press Enter.");
+    });
+    if (search) search.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter" || !search.value.trim()) return;
+      event.preventDefault();
+      request("/books/barcode?value=" + encodeURIComponent(search.value.trim())).then(function (result) {
+        setBookModal(result.book);
+        notify("Book found: " + result.book.title + ".");
+      }).catch(function (error) { notify(error.message, true); });
     });
     table.querySelector("tbody").addEventListener("click", async function (event) {
       const button = event.target.closest("button[data-action]");
@@ -438,11 +550,11 @@
     if (save) save.addEventListener("click", async function () {
       const fields = bookFields();
       const payload = {};
-      ["barcode", "title", "author", "category", "published_date", "quantity"].forEach(function (key) {
+      ["book_number", "barcode", "title", "author", "category", "published_date", "quantity"].forEach(function (key) {
         payload[key] = fields[key].value.trim();
       });
-      if (!payload.barcode || !payload.title || !payload.author || !payload.category || !payload.quantity) {
-        return notify("Complete the book number, title, author, category, and book count.", true);
+      if (!payload.book_number || !payload.barcode || !payload.title || !payload.author || !payload.category || !payload.quantity) {
+        return notify("Complete the book number, barcode, title, author, category, and book count.", true);
       }
       try {
         await request(addingBook ? "/books" : "/books/" + activeBook.id, {
@@ -459,6 +571,28 @@
       modal.classList.remove("active");
       try { await borrowBook(activeBook); } catch (error) { notify(error.message, true); }
     });
+    const barcodeInput = document.getElementById("barcodeInput");
+    const scanBarcodeButton = document.getElementById("scanBarcodeButton");
+    const generateBarcodeButton = document.getElementById("generateBarcodeButton");
+    const printBarcodeButton = document.getElementById("printBarcodeButton");
+    if (scanBarcodeButton && barcodeInput) scanBarcodeButton.addEventListener("click", function () {
+      barcodeInput.focus();
+      notify("Scan the physical barcode, or type it manually and press Enter.");
+    });
+    if (barcodeInput) barcodeInput.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      verifyScannedBarcode(barcodeInput);
+    });
+    if (generateBarcodeButton && barcodeInput) generateBarcodeButton.addEventListener("click", async function () {
+      try {
+        const result = await request("/books/generate-barcode", { method: "POST" });
+        barcodeInput.value = result.barcode;
+        updateBarcodePreview(result.barcode);
+        notify("Unique barcode generated.");
+      } catch (error) { notify(error.message, true); }
+    });
+    if (printBarcodeButton) printBarcodeButton.addEventListener("click", printBarcode);
     const coverInput = document.getElementById("bookCoverInput");
     const coverImage = document.getElementById("bookCoverImage");
     const coverFileName = document.getElementById("coverFileName");
@@ -673,7 +807,9 @@
         return;
       }
       showDialog(managedView === "system" ? "Deactivate System Account" : "Deactivate Person", [],
-        record.name + " will no longer be able to sign in or generate attendance records.", "Deactivate", async function () {
+        record.name + (managedView === "system"
+          ? " will no longer be able to sign in."
+          : " will no longer be able to enter the library."), "Deactivate", async function () {
           await request((managedView === "system" ? "/system-users/" : "/people/") + record.id, { method: "DELETE" });
           notify(managedView === "system" ? "System account deactivated." : "Person deactivated and attendance closed.");
           await loadManagedRecords(managedView, managedSearchText, managedRoleFilter);
