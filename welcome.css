@@ -62,18 +62,16 @@ body {
 /* Logo */
 
 .logo {
-    width: 390px;
+    width: 330px;
 }
 
 
 /* Text */
 
 .text h1 {
-    font-size: 58px;
+    font-size: 52px;
     font-weight: 800;
-
     color: #111111;
-
     line-height: 1.1;
 }
 

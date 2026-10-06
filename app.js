@@ -174,10 +174,10 @@
         ["OVERDUE BOOKS", stats.overdue_books, "overdue"],
         ["PEOPLE CURRENTLY INSIDE", stats.people_inside, ""]
       ];
-      const template = metricContainer.querySelector(".metric");
-      metricContainer.innerHTML = "";
-      cards.forEach(function (card) {
-        const item = template.cloneNode(true);
+      const metricItems = metricContainer.querySelectorAll(".metric");
+      cards.forEach(function (card, index) {
+        const item = metricItems[index];
+        if (!item) return;
         item.classList.remove("dashboard-card-link");
         item.removeAttribute("role");
         item.removeAttribute("tabindex");
@@ -682,10 +682,6 @@
     setView("system");
   }
 
-  function csvCell(value) {
-    return '"' + String(value == null ? "" : value).replace(/"/g, '""') + '"';
-  }
-
   function bindReportsPage() {
     const table = document.querySelector(".main table");
     const tbody = table && table.querySelector("tbody");
@@ -770,20 +766,83 @@
       });
     const generate = document.querySelector(".btn-generate, .gen-btn");
     if (generate) generate.addEventListener("click", async function () {
+      const reportWindow = window.open("", "_blank");
+      if (!reportWindow) {
+        notify("Allow pop-ups for this site to generate the PDF report.", true);
+        return;
+      }
       try {
         await load();
-        const header = ["School ID", "Name", "Role", "Department", "Date", "Time-in", "Time-out", "Status"];
-        const lines = [header.map(csvCell).join(",")];
-        reportRows.forEach(function (item) {
-          lines.push([item.school_id, item.name, item.role, item.department, item.attendance_date,
-            item.time_in, item.time_out, item.status].map(csvCell).join(","));
+        const from = document.getElementById("dateFrom");
+        const to = document.getElementById("dateTo");
+        const search = document.getElementById("attendanceSearch");
+        const role = document.getElementById("attendanceRole");
+        const department = document.getElementById("attendanceDepartment");
+        const eventType = document.getElementById("attendanceEvent");
+        const filters = [
+          from && from.value ? "From: " + from.value : "",
+          to && to.value ? "To: " + to.value : "",
+          search && search.value.trim() ? "Search: " + search.value.trim() : "",
+          role && role.value ? "Role: " + role.value : "",
+          department && department.value.trim() ? "Department: " + department.value.trim() : "",
+          eventType && eventType.value && eventType.value !== "all"
+            ? "Record type: " + eventType.options[eventType.selectedIndex].text
+            : ""
+        ].filter(Boolean);
+        const generatedAt = new Date().toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" });
+        const tableRows = reportRows.map(function (item) {
+          return "<tr><td>" + escapeHtml(item.school_id) + "</td><td>" + escapeHtml(item.name) +
+            "</td><td>" + escapeHtml(item.role) + "</td><td>" + escapeHtml(item.department) +
+            "</td><td>" + escapeHtml(item.attendance_date) + "</td><td>" + escapeHtml(item.time_in) +
+            "</td><td>" + escapeHtml(item.time_out || "--") + "</td><td><span class=\"status\">" +
+            escapeHtml(item.status) + "</span></td></tr>";
         });
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" }));
-        link.download = "smart-library-transactions.csv";
-        link.click();
-        URL.revokeObjectURL(link.href);
-      } catch (error) { notify(error.message, true); }
+        const logoUrl = new URL("../img/ptc_logo.png", window.location.href).href;
+        const reportMarkup = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">' +
+          '<meta name="viewport" content="width=device-width, initial-scale=1"><title>PTC Attendance Report</title>' +
+          '<style>' +
+          '@page{size:landscape;margin:13mm}*{box-sizing:border-box}body{margin:0;background:#eef3ef;color:#183b2b;font:10px/1.45 Arial,sans-serif}' +
+          '.report{max-width:1200px;margin:24px auto;padding:30px;background:#fff;box-shadow:0 8px 28px #173e2920}' +
+          '.masthead{display:flex;align-items:center;gap:14px;padding:0 0 18px;border-bottom:2px solid #d8e6dc}' +
+          '.logo{width:54px;height:54px;object-fit:contain}.school{color:#587064;font-size:9px;font-weight:700;letter-spacing:1.6px;text-transform:uppercase}' +
+          'h1{margin:4px 0 0;font-size:24px;line-height:1.15;letter-spacing:-.5px}.subtitle{margin:5px 0 0;color:#66786d;font-size:11px}' +
+          '.summary{display:flex;gap:12px;margin:20px 0}.summary-card{flex:1;padding:12px 14px;border:1px solid #dce8df;border-radius:8px;background:#f6f9f6}' +
+          '.summary-label{color:#63766a;font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase}.summary-value{margin-top:4px;font-size:14px;font-weight:700}' +
+          '.filters{margin:0 0 15px;padding:10px 12px;border-left:3px solid #38734f;background:#f3f7f4;color:#43594b;font-size:9px}' +
+          '.filters strong{margin-right:5px;color:#183b2b}.table-wrap{width:100%;overflow:visible}table{width:100%;border-collapse:collapse;table-layout:fixed}' +
+          'thead{display:table-header-group}th{padding:9px 7px;background:#204a34;color:#fff;text-align:left;font-size:8px;letter-spacing:.45px;text-transform:uppercase}' +
+          'td{padding:8px 7px;border-bottom:1px solid #e2eae4;color:#294536;vertical-align:top;overflow-wrap:anywhere;font-size:8.5px}' +
+          'tbody tr:nth-child(even){background:#f5f8f5}tr{break-inside:avoid}.status{display:inline-block;padding:2px 6px;border-radius:10px;background:#e5f2e8;color:#2d6842;font-size:7px;font-weight:700;text-transform:capitalize}' +
+          '.empty{text-align:center;color:#718176;padding:24px}.footer{display:flex;justify-content:space-between;gap:20px;margin-top:18px;padding-top:9px;border-top:1px solid #dce6de;color:#76847a;font-size:8px}' +
+          '@media print{body{background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}.report{max-width:none;margin:0;padding:0;box-shadow:none}.summary-card{break-inside:avoid}}' +
+          '</style></head><body><main class="report"><header class="masthead"><img class="logo" src="' + escapeHtml(logoUrl) +
+          '" alt=""><div><div class="school">Pateros Technological College · Smart Library System</div><h1>Attendance Report</h1>' +
+          '<p class="subtitle">Official time-in and time-out records</p></div></header><section class="summary">' +
+          '<div class="summary-card"><div class="summary-label">Records included</div><div class="summary-value">' + reportRows.length +
+          '</div></div><div class="summary-card"><div class="summary-label">Date range</div><div class="summary-value">' +
+          escapeHtml(from && from.value ? from.value : "All dates") + " – " + escapeHtml(to && to.value ? to.value : "Present") +
+          '</div></div><div class="summary-card"><div class="summary-label">Prepared</div><div class="summary-value">' +
+          escapeHtml(generatedAt) + '</div></div></section><div class="filters"><strong>Applied filters:</strong>' +
+          escapeHtml(filters.length ? filters.join(" · ") : "All available records") +
+          '</div><div class="table-wrap"><table><thead><tr><th style="width:10%">School ID</th><th style="width:16%">Name</th>' +
+          '<th style="width:9%">Role</th><th style="width:15%">Department</th><th style="width:10%">Date</th>' +
+          '<th style="width:12%">Time-in</th><th style="width:12%">Time-out</th><th style="width:10%">Status</th></tr></thead><tbody>' +
+          (tableRows.length ? tableRows.join("") : '<tr><td class="empty" colspan="8">No attendance records match the selected filters.</td></tr>') +
+          '</tbody></table></div><footer class="footer"><span>Generated from the Smart Library System</span><span>For authorized institutional use</span></footer></main></body></html>';
+        reportWindow.document.open();
+        reportWindow.document.write(reportMarkup);
+        reportWindow.document.close();
+        reportWindow.document.title = "PTC-Attendance-Report";
+        window.setTimeout(function () {
+          if (!reportWindow.closed) {
+            reportWindow.focus();
+            reportWindow.print();
+          }
+        }, 300);
+      } catch (error) {
+        reportWindow.close();
+        notify(error.message, true);
+      }
     });
     load().catch(function (error) { notify(error.message, true); });
   }

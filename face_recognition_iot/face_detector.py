@@ -6,7 +6,7 @@ import cv2
 class FaceDetector:
     def __init__(self, model_path):
         self.detector = cv2.FaceDetectorYN.create(
-            str(model_path), "", (320, 320), 0.85, 0.3, 5000
+            str(model_path), "", (320, 320), 0.7, 0.3, 5000
         )
 
     def detect(self, image):

@@ -14,8 +14,14 @@ class FaceRecognizer:
 
     def encode(self, image):
         faces = self.detector.detect(image)
-        if len(faces) != 1:
-            raise ValueError("The image must contain exactly one detectable face.")
+        if not faces:
+            raise ValueError(
+                "No face was detected. Use a clear, front-facing image with the face fully visible."
+            )
+        if len(faces) > 1:
+            raise ValueError(
+                f"Detected {len(faces)} faces. Use an image containing only one person."
+            )
         aligned = self.recognizer.alignCrop(image, faces[0])
         embedding = self.recognizer.feature(aligned).reshape(-1).astype(np.float32)
         norm = np.linalg.norm(embedding)

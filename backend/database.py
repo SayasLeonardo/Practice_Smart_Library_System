@@ -102,7 +102,7 @@ def initialize_database():
         user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if user_count == 0:
             users = [
-                ("MIS-001", "System Administrator", "admin@smartlibrary.local", "admin123", "MIS Admin", "MIS"),
+                ("MIS-001", "PTC MIS", "admin@smartlibrary.local", "admin123", "MIS Admin", "MIS"),
                 ("LIB-001", "PTC Librarian", "librarian@smartlibrary.local", "librarian123", "Librarian", "Library"),
                 ("2023-10252", "Sandara Panis", "2023-10252@student.ptc.local", None, "Student", "BSIT"),
                 ("2022-09512", "Leonardo Sayas", "2022-09512@student.ptc.local", None, "Student", "BSIT"),
