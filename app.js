@@ -144,6 +144,22 @@
       .catch(function (error) { notify(error.message, true); });
   }
 
+  async function requestPasswordReset(requestKey, resetToken, newPassword, confirmPassword) {
+    const result = await request("/auth/recovery/reset", {
+      method: "POST",
+      body: JSON.stringify({
+        request_key: requestKey,
+        reset_token: resetToken,
+        newPassword: newPassword,
+        confirmPassword: confirmPassword
+      })
+    });
+    notify(result.message, false);
+    sessionStorage.removeItem("recovery_request_key");
+    sessionStorage.removeItem("recovery_reset_token");
+    window.location.href = "/LogIn.html";
+  }
+
   function togglePassword(inputId) {
     const input = document.getElementById(inputId || "password");
     if (input) input.type = input.type === "password" ? "text" : "password";
@@ -209,6 +225,92 @@
       }).join("") : '<tr><td colspan="5">No attendance records yet.</td></tr>';
     }
     bindDashboardCards();
+  }
+
+  async function bindRecoveryRequests() {
+    const body = document.getElementById("recovery-request-rows");
+    const pendingCount = document.getElementById("recoveryPendingCount");
+    if (!body || !pendingCount) return;
+
+    async function refresh() {
+      const result = await request("/auth/recovery/requests");
+      const requests = result.requests || [];
+      const pending = requests.filter(function (item) { return item.status === "pending"; });
+      pendingCount.textContent = pending.length + " pending";
+      body.innerHTML = requests.length ? requests.map(function (item) {
+        const statusLabels = {
+          pending: "Pending Approval",
+          approved: "Approved",
+          rejected: "Rejected",
+          expired: "Expired",
+          completed: "Completed"
+        };
+        const actions = item.status === "pending"
+          ? '<div class="recovery-action"><button type="button" data-action="view" data-request-id="' + item.id + '">View Request</button>' +
+            '<button type="button" data-action="approve" data-request-id="' + item.id + '">Approve</button>' +
+            '<button type="button" data-action="reject" data-request-id="' + item.id + '">Reject</button></div>'
+          : '<span class="recovery-action">—</span>';
+        return '<tr data-request-id="' + item.id + '">' +
+          '<td>' + escapeHtml(item.librarian_name) + '</td>' +
+          '<td>' + escapeHtml(item.email) + '</td>' +
+          '<td>' + escapeHtml(item.requested_at) + '</td>' +
+          '<td class="recovery-status">' + escapeHtml(statusLabels[item.status] || item.status) + '</td>' +
+          '<td>' + actions + '</td></tr>';
+      }).join("") : '<tr><td colspan="5">No recovery requests.</td></tr>';
+    }
+
+    body.addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-action]");
+      if (!button) return;
+      const requestId = Number(button.dataset.requestId);
+      const row = button.closest("tr");
+      if (button.dataset.action === "view") {
+        showDialog("Password Recovery Request", [], [
+          "Librarian: " + row.cells[0].textContent,
+          "Institutional email: " + row.cells[1].textContent,
+          "Requested: " + row.cells[2].textContent,
+          "Status: " + row.cells[3].textContent,
+          "Verify the Librarian in person before approving. The code is only shown after approval."
+        ].join("\n\n"), "Close", function () {});
+        return;
+      }
+      const decision = button.dataset.action;
+      const decisionLabel = decision === "approve" ? "Approve" : "Reject";
+      showDialog(
+        decisionLabel + " Recovery Request",
+        [],
+        decision === "approve"
+          ? "Confirm that you verified " + row.cells[0].textContent + " in person. A one-time code will be displayed once for private handoff."
+          : "Reject the password recovery request for " + row.cells[0].textContent + "? The request will not be usable.",
+        "Confirm " + decisionLabel,
+        async function () {
+          const result = await request("/auth/recovery/approve", {
+            method: "POST",
+            body: JSON.stringify({ request_id: requestId, decision: decision })
+          });
+          if (result.recovery_code) {
+            showDialog(
+              "One-Time Recovery Code",
+              [],
+              "Give this code directly to the Librarian you verified in person. It expires at " +
+                result.expires_at + ". Do not send or record it elsewhere.\n\nCode: " + result.recovery_code,
+              "I Have Provided It",
+              async function () {
+                await refresh();
+              }
+            );
+          } else {
+            notify(result.message);
+            await refresh();
+          }
+        }
+      );
+    });
+
+    await refresh();
+    window.setInterval(function () {
+      refresh().catch(function (error) { notify(error.message, true); });
+    }, 10000);
   }
 
   function showRowsDialog(title, headers, rows) {
@@ -325,6 +427,10 @@
   function renderBooks() {
     const table = document.querySelector(".grid-table");
     if (!table) return;
+    const countLabel = document.getElementById("book-count-label");
+    if (countLabel) {
+      countLabel.textContent = String(books.length);
+    }
     const header = table.querySelector("thead tr");
     if (header && !header.querySelector("th[data-actions]")) {
       const actionHeader = document.createElement("th");
@@ -646,7 +752,8 @@
       return '<option value="' + role + '"' + ((person && person.role === role) ? " selected" : "") + ">" + role + "</option>";
     }).join("");
     const statusOptions = ["active", "inactive"].map(function (status) {
-      return '<option value="' + status + '"' + ((person && person.status === status) ? " selected" : "") + ">" + status + "</option>";
+      const label = status === "active" ? "Active" : "Inactive";
+      return '<option value="' + status + '"' + ((person && String(person.status).toLowerCase() === status) ? " selected" : "") + ">" + label + "</option>";
     }).join("");
     dialog.innerHTML = '<form><h2>' + (person ? "Edit People Information" : "Add People Information") +
       '</h2><div class="dialog-field"><label>School ID<input name="school_id" required maxlength="50" value="' + escapeHtml(person && person.school_id) + '"></label></div>' +
@@ -694,7 +801,9 @@
 
   function showSystemUserForm(user) {
     const roles = ["MIS Admin", "Librarian"].map(function (role) { return { value: role, label: role }; });
-    const statuses = ["active", "inactive"].map(function (status) { return { value: status, label: status }; });
+    const statuses = ["active", "inactive"].map(function (status) {
+      return { value: status, label: status === "active" ? "Active" : "Inactive" };
+    });
     const values = user || {};
     showDialog(user ? "Edit System Account" : "Add System User", [
       { name: "school_id", label: "Account ID", value: values.school_id, required: true },
@@ -730,22 +839,28 @@
     if (view === "system") {
       head.innerHTML = "<th>NAME</th><th>EMAIL</th><th>ROLE</th><th>ACCOUNT STATUS</th><th>CREATED</th><th>LAST LOGIN</th><th class=\"center\">ACTION</th>";
       body.innerHTML = managedUsers.length ? managedUsers.map(function (user) {
+        const status = String(user.status || "").toLowerCase();
+        const statusLabel = status === "active" ? "Active" : status === "inactive" ? "Inactive" : user.status;
         return '<tr data-user-id="' + user.id + '"><td class="bold">' + escapeHtml(user.name) +
-          '</td><td>' + escapeHtml(user.email) + '</td><td>' + escapeHtml(user.role) + '</td><td>' + escapeHtml(user.status) +
+          '</td><td>' + escapeHtml(user.email) + '</td><td>' + escapeHtml(user.role) + '</td><td>' + escapeHtml(statusLabel) +
           '</td><td>' + escapeHtml(user.created_at || "--") + '</td><td>' + escapeHtml(user.last_login_at || "--") +
           '</td><td class="center actions"><button class="btn-icon edit" title="Edit system account" aria-label="Edit system account" data-action="edit">Edit</button>' +
-          (user.status === "active" ? '<button class="btn-icon delete" title="Deactivate system account" aria-label="Deactivate system account" data-action="deactivate">Deactivate</button>' : "") +
+          (status === "active" ? '<button class="btn-icon delete" title="Deactivate system account" aria-label="Deactivate system account" data-action="deactivate">Deactivate</button>' : "") +
+          (status === "inactive" ? '<button class="btn-icon delete" title="Permanently delete system account" aria-label="Permanently delete system account" data-action="delete">Delete Permanently</button>' : "") +
           '</td></tr>';
       }).join("") : '<tr><td colspan="7">No system accounts found.</td></tr>';
     } else {
       head.innerHTML = "<th>SCHOOL ID</th><th>NAME</th><th>ROLE</th><th>DEPARTMENT</th><th>CONTACT</th><th>STATUS</th><th>FACE RECOGNITION</th><th class=\"center\">ACTION</th>";
       body.innerHTML = managedUsers.length ? managedUsers.map(function (person) {
+        const status = String(person.status || "").toLowerCase();
+        const statusLabel = status === "active" ? "Active" : status === "inactive" ? "Inactive" : person.status;
         return '<tr data-user-id="' + person.id + '"><td class="bold">' + escapeHtml(person.school_id) +
           '</td><td class="bold">' + escapeHtml(person.name) + '</td><td>' + escapeHtml(person.role) +
-          '</td><td>' + escapeHtml(person.department) + '</td><td>' + escapeHtml(person.contact) + '</td><td>' + escapeHtml(person.status) +
+          '</td><td>' + escapeHtml(person.department) + '</td><td>' + escapeHtml(person.contact) + '</td><td>' + escapeHtml(statusLabel) +
           '</td><td>' + (person.face_registered ? "Registered" : (person.has_face_image ? "Pending" : "Not registered")) +
           '</td><td class="center actions"><button class="btn-icon edit" title="Edit people information" aria-label="Edit people information" data-action="edit">Edit</button>' +
-          (person.status === "active" ? '<button class="btn-icon delete" title="Deactivate person" aria-label="Deactivate person" data-action="deactivate">Deactivate</button>' : "") +
+          (status === "active" ? '<button class="btn-icon delete" title="Deactivate person" aria-label="Deactivate person" data-action="deactivate">Deactivate</button>' : "") +
+          (status === "inactive" ? '<button class="btn-icon delete" title="Permanently delete people information" aria-label="Permanently delete people information" data-action="delete">Delete Permanently</button>' : "") +
           '</td></tr>';
       }).join("") : '<tr><td colspan="8">No people information found.</td></tr>';
     }
@@ -806,14 +921,32 @@
         else showPersonForm(record);
         return;
       }
-      showDialog(managedView === "system" ? "Deactivate System Account" : "Deactivate Person", [],
-        record.name + (managedView === "system"
-          ? " will no longer be able to sign in."
-          : " will no longer be able to enter the library."), "Deactivate", async function () {
-          await request((managedView === "system" ? "/system-users/" : "/people/") + record.id, { method: "DELETE" });
-          notify(managedView === "system" ? "System account deactivated." : "Person deactivated and attendance closed.");
-          await loadManagedRecords(managedView, managedSearchText, managedRoleFilter);
-        });
+      const view = managedView;
+      const isSystemUser = view === "system";
+      if (button.dataset.action === "deactivate") {
+        showDialog(isSystemUser ? "Deactivate System Account" : "Deactivate Person", [],
+          record.name + (isSystemUser
+            ? " will no longer be able to sign in."
+            : " will no longer be able to enter the library."), "Deactivate", async function () {
+            await request((isSystemUser ? "/system-users/" : "/people/") + record.id, { method: "DELETE" });
+            notify(isSystemUser ? "System account deactivated." : "Person deactivated and attendance closed.");
+            await loadManagedRecords(view, managedSearchText, managedRoleFilter);
+          });
+        return;
+      }
+      if (button.dataset.action === "delete") {
+        if (String(record.status || "").toLowerCase() !== "inactive") {
+          notify("Only inactive users can be permanently deleted.", true);
+          return;
+        }
+        showDialog(isSystemUser ? "Permanently Delete System Account" : "Permanently Delete People Information", [],
+          "Are you sure you want to permanently delete this inactive user? Their account and personal information will be deleted, but their historical records will be preserved. This action cannot be undone.",
+          "Confirm Delete", async function () {
+            await request((isSystemUser ? "/system-users/" : "/people/") + record.id + "/permanent", { method: "DELETE" });
+            notify(isSystemUser ? "System account permanently deleted; history was preserved." : "People information permanently deleted; history was preserved.");
+            await loadManagedRecords(view, managedSearchText, managedRoleFilter);
+          });
+      }
     });
     setView("system");
   }
@@ -868,7 +1001,9 @@
       field.append(label, control);
       if (filterGrid) filterGrid.appendChild(field);
     });
-    table.querySelector("thead").innerHTML = "<tr><th>SCHOOL ID</th><th>NAME</th><th>ROLE</th><th>DEPARTMENT</th><th>DATE</th><th>TIME-IN</th><th>TIME-OUT</th><th>STATUS</th></tr>";
+    const canDeleteAttendance = currentUser && currentUser.role === "MIS Admin";
+    table.querySelector("thead").innerHTML = "<tr><th>SCHOOL ID</th><th>NAME</th><th>ROLE</th><th>DEPARTMENT</th><th>DATE</th><th>TIME-IN</th><th>TIME-OUT</th><th>STATUS</th>" +
+      (canDeleteAttendance ? "<th class=\"center\">ACTION</th>" : "") + "</tr>";
     let reportRows = [];
     async function load() {
       const parameters = new URLSearchParams();
@@ -890,8 +1025,26 @@
         return "<tr><td>" + escapeHtml(item.school_id) + "</td><td>" + escapeHtml(item.name) +
           "</td><td>" + escapeHtml(item.role) + "</td><td>" + escapeHtml(item.department) +
           "</td><td>" + escapeHtml(item.attendance_date) + "</td><td>" + escapeHtml(item.time_in) +
-          "</td><td>" + escapeHtml(item.time_out || "--") + "</td><td>" + escapeHtml(item.status) + "</td></tr>";
-      }).join("") : '<tr><td colspan="8">No attendance records in this date range.</td></tr>';
+          "</td><td>" + escapeHtml(item.time_out || "--") + "</td><td>" + escapeHtml(item.status) + "</td>" +
+          (canDeleteAttendance ? '<td class="center actions"><button type="button" class="btn-icon delete" title="Delete attendance history record" aria-label="Delete attendance history record" data-action="delete-attendance" data-record-id="' +
+            item.id + '">Delete</button></td>' : "") + "</tr>";
+      }).join("") : '<tr><td colspan="' + (canDeleteAttendance ? "9" : "8") + '">No attendance records in this date range.</td></tr>';
+    }
+    if (canDeleteAttendance) {
+      tbody.addEventListener("click", function (event) {
+        const button = event.target.closest("button[data-action='delete-attendance']");
+        if (!button) return;
+        const record = reportRows.find(function (item) { return item.id === Number(button.dataset.recordId); });
+        if (!record) return;
+        showDialog("Delete Attendance History", [],
+          "Delete the attendance record for " + record.name + " (" + record.school_id + ") on " +
+            record.attendance_date + " at " + record.time_in + "? This action cannot be undone.",
+          "Confirm Delete", async function () {
+            await request("/attendance/" + record.id, { method: "DELETE" });
+            notify("Attendance history record deleted.");
+            await load();
+          });
+      });
     }
     [document.getElementById("dateFrom"), document.getElementById("dateTo"), document.getElementById("attendanceSearch"),
       document.getElementById("attendanceRole"), document.getElementById("attendanceDepartment"), document.getElementById("attendanceEvent")]
@@ -1019,6 +1172,7 @@
     if (page === "dashboard.html") {
       const refresh = async function () { renderDashboard(await request("/dashboard")); };
       await refresh();
+      if (currentUser.role === "MIS Admin") await bindRecoveryRequests();
       window.setInterval(function () { refresh().catch(function (error) { notify(error.message, true); }); }, 15000);
     } else if (page === "time_in_out.html") {
       bindAttendancePage();
@@ -1034,8 +1188,129 @@
   window.login = login;
   window.togglePassword = togglePassword;
   document.addEventListener("DOMContentLoaded", function () {
-    if (document.getElementById("email") && document.querySelector("form")) {
-      document.querySelector("form").addEventListener("submit", login);
+    const loginForm = document.querySelector("form");
+    if (document.getElementById("email") && loginForm) {
+      if (window.location.pathname === "/LogIn.html") {
+        loginForm.addEventListener("submit", login);
+      }
+    }
+    if (window.location.pathname === "/EmailVerification.html") {
+      const emailField = document.getElementById("email");
+      if (emailField && loginForm) {
+        loginForm.addEventListener("submit", function (event) {
+          event.preventDefault();
+          const email = emailField.value.trim();
+          if (!emailField.checkValidity()) {
+            emailField.reportValidity();
+            return;
+          }
+          request("/auth/recovery/request", {
+            method: "POST",
+            body: JSON.stringify({ email: email })
+          }).then(function (result) {
+            notify(result.message, false);
+            sessionStorage.setItem("recovery_request_key", result.request_key);
+            window.location.href = "/VerificationCode.html";
+          }).catch(function (error) { notify(error.message, true); });
+        });
+      }
+    }
+    if (window.location.pathname === "/VerificationCode.html") {
+      const codeInputs = Array.from(document.querySelectorAll(".code-container input"));
+      const form = document.querySelector("form");
+      const requestKey = sessionStorage.getItem("recovery_request_key") || "";
+      const status = document.getElementById("recovery-status");
+      if (!requestKey) {
+        if (status) status.textContent = "Submit a recovery request first.";
+      } else {
+        const updateStatus = async function () {
+          const result = await request("/auth/recovery/status", {
+            method: "POST",
+            body: JSON.stringify({ request_key: requestKey })
+          });
+          if (status) {
+            const messages = {
+              pending: "If eligible, your request is awaiting MIS Admin approval.",
+              approved: "Approved. Enter the six-digit code provided to you by the MIS Admin.",
+              verified: "Verified. Continue to set your new password.",
+              rejected: "Your recovery request was rejected. Submit a new request if needed.",
+              expired: "The request or code expired. Return to Forgot Password to start again.",
+              completed: "This recovery request has already been completed."
+            };
+            status.textContent = messages[result.status] || "Recovery status: " + result.status + ".";
+          }
+          const approved = result.status === "approved";
+          codeInputs.forEach(function (input) { input.disabled = !approved; });
+          const submit = form && form.querySelector("button[type='submit']");
+          if (submit) submit.disabled = !approved;
+          if (result.expires_at) {
+            const remaining = Math.max(0, Math.floor((Date.parse(result.expires_at) - Date.now()) / 1000));
+            if (status && remaining > 0) {
+              status.textContent += " Code expires in " +
+                Math.floor(remaining / 60) + ":" + String(remaining % 60).padStart(2, "0") + ".";
+            }
+          }
+          return result;
+        };
+        updateStatus().catch(function (error) { if (status) status.textContent = error.message; });
+        window.setInterval(function () {
+          updateStatus().catch(function (error) { if (status) status.textContent = error.message; });
+        }, 5000);
+      }
+      if (form && codeInputs.length) {
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          const code = codeInputs.map(function (input) { return input.value.trim(); }).join("");
+          if (!requestKey || !/^\d{6}$/.test(code)) {
+            notify("Enter the full six-digit recovery code.", true);
+            return;
+          }
+          request("/auth/recovery/verify", {
+            method: "POST",
+            body: JSON.stringify({ request_key: requestKey, code: code })
+          }).then(function (result) {
+            notify(result.message, false);
+            sessionStorage.setItem("recovery_reset_token", result.reset_token);
+            window.location.href = "/ChangePassword.html";
+          }).catch(function (error) { notify(error.message, true); });
+        });
+        codeInputs.forEach(function (input, index) {
+          input.addEventListener("input", function () {
+            input.value = input.value.replace(/\D/g, "").slice(0, 1);
+            if (input.value && index < codeInputs.length - 1) {
+              codeInputs[index + 1].focus();
+            }
+          });
+          input.addEventListener("keydown", function (event) {
+            if (event.key === "Backspace" && !input.value && index > 0) {
+              codeInputs[index - 1].focus();
+            }
+          });
+        });
+      }
+    }
+    if (window.location.pathname === "/ChangePassword.html") {
+      const form = document.querySelector("form");
+      const requestKey = sessionStorage.getItem("recovery_request_key") || "";
+      const resetToken = sessionStorage.getItem("recovery_reset_token") || "";
+      if (!requestKey || !resetToken) {
+        window.location.replace("/VerificationCode.html");
+        return;
+      }
+      if (form) {
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          const requestKey = sessionStorage.getItem("recovery_request_key") || "";
+          const resetToken = sessionStorage.getItem("recovery_reset_token") || "";
+          const newPassword = document.getElementById("new-password").value;
+          const confirmPassword = document.getElementById("confirm-password").value;
+          if (!requestKey || !resetToken) {
+            notify("Verify the recovery code before changing the password.", true);
+            return;
+          }
+          requestPasswordReset(requestKey, resetToken, newPassword, confirmPassword).catch(function (error) { notify(error.message, true); });
+        });
+      }
     }
     if (window.location.pathname.startsWith("/LIBRARIAN/") || window.location.pathname.startsWith("/MIS_ADMIN/")) {
       addInteractiveStyles();

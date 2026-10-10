@@ -97,6 +97,27 @@
         </div>
       </div>
 
+      <section class="recovery-requests" aria-labelledby="recoveryRequestsTitle">
+        <div class="recovery-heading">
+          <h2 id="recoveryRequestsTitle">Password Recovery Requests</h2>
+          <span id="recoveryPendingCount" class="recovery-count" aria-live="polite">0 pending</span>
+        </div>
+        <p class="recovery-instructions">
+          Verify the Librarian in person before approving. The one-time code is shown only after approval;
+          provide it privately. Never share it over an untrusted channel.
+        </p>
+        <div class="scroll recovery-scroll" tabindex="0">
+          <table>
+            <thead>
+              <tr><th>LIBRARIAN</th><th>EMAIL</th><th>REQUESTED</th><th>STATUS</th><th>ACTION</th></tr>
+            </thead>
+            <tbody id="recovery-request-rows">
+              <tr><td colspan="5">Loading recovery requests...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- Live access logs -->
       <div class="logs">
         <h2>Live Access Logs</h2>

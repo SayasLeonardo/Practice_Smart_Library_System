@@ -75,6 +75,14 @@ h1 {
     margin-bottom: 35px;
 }
 
+.verification-container > p {
+    color: #1e3f2e;
+    font-size: 14px;
+    line-height: 1.5;
+    margin: -22px 0 24px;
+    text-align: center;
+}
+
 
 /* Input */
 

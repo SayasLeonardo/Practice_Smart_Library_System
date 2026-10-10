@@ -19,16 +19,19 @@
 
         <h1>Verification Code</h1>
 
+        <p id="recovery-status" role="status" aria-live="polite">Checking recovery request status...</p>
+        <p>The MIS Admin must approve your request. After approval, the code must be provided to you directly by the verified MIS Admin.</p>
+
         <form>
 
             <div class="code-container">
 
-                <input type="text" maxlength="1" inputmode="numeric" required>
-                <input type="text" maxlength="1" inputmode="numeric" required>
-                <input type="text" maxlength="1" inputmode="numeric" required>
-                <input type="text" maxlength="1" inputmode="numeric" required>
-                <input type="text" maxlength="1" inputmode="numeric" required>
-                <input type="text" maxlength="1" inputmode="numeric" required>
+                <input type="text" maxlength="1" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]" aria-label="Digit 1" disabled required>
+                <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" aria-label="Digit 2" disabled required>
+                <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" aria-label="Digit 3" disabled required>
+                <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" aria-label="Digit 4" disabled required>
+                <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" aria-label="Digit 5" disabled required>
+                <input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" aria-label="Digit 6" disabled required>
 
             </div>
 
@@ -40,5 +43,6 @@
 
     </div>
 
+    <script src="app.js"></script>
 </body>
 </html>

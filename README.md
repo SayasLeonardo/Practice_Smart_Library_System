@@ -49,10 +49,10 @@ Leave this terminal running too. On its first start, the station downloads the Y
 
 ### 3. Sign in and use face attendance
 
-If the database has no users yet, the starter accounts are:
+When created, the default development staff accounts use:
 
-- MIS Admin: `admin@smartlibrary.local` / `admin123`
-- Librarian: `librarian@smartlibrary.local` / `librarian123`
+- MIS Admin: `sayasleonardo3@gmail.com` / `admin123`
+- Librarian: `leosayas04@gmail.com` / `librarian123`
 
 These are not replacement credentials for an existing database; existing accounts and passwords are preserved. Sign in as MIS Admin, add or select a person, and upload that person's face image. Then use the camera station, select **Time-in** or **Time-out**, and confirm the action after the person is recognized. Recognition alone does not record attendance.
 
@@ -70,18 +70,26 @@ In each PowerShell terminal, press **Ctrl+C**. Stop the camera station first, th
 
 The Flask development servers bind to `127.0.0.1` and are for local development, not production deployment. Change development passwords before any wider deployment; configure a strong `SMART_LIBRARY_SECRET` and HTTPS (`SMART_LIBRARY_HTTPS=1`) in a properly secured deployment.
 
-## Empty-database starter accounts
+## Development staff accounts
 
-These accounts are created only when the database contains no users. Existing accounts and passwords are preserved, and people records remain in their current database IDs.
+These accounts are created when missing with the initial passwords below. Existing account passwords are preserved, and people records remain in their current database IDs.
 
-- MIS Admin: `admin@smartlibrary.local` / `admin123`
-- Librarian: `librarian@smartlibrary.local` / `librarian123`
+- MIS Admin: `sayasleonardo3@gmail.com` / `admin123`
+- Librarian: `leosayas04@gmail.com` / `librarian123`
 
 Change these development passwords before exposing the system to a network. In a deployed environment, set a strong `SMART_LIBRARY_SECRET` and use HTTPS (`SMART_LIBRARY_HTTPS=1`).
 
 ## Roles and API
 
 MIS Admin and Librarian accounts can use the dashboard, book catalog, borrowing/returns, attendance history, and reports. Only MIS Admins can manage people and system accounts. People records do not receive login passwords.
+
+## Librarian password recovery
+
+Password recovery is handled inside the system and does not use SMTP or external email. From **Forgot Password?**, an active Librarian submits their registered email address. The MIS Admin dashboard polls for recovery requests and provides **View Request**, **Approve**, and **Reject** actions.
+
+The MIS Admin must verify the Librarian in person before approving. After approval, the dashboard displays a six-digit code once for private handoff; the code is not shown in the request list and is valid for 15 minutes. The Librarian enters that code on the verification page and sets a new password of at least eight characters. The code can only be used once. Recovery requests expire after 24 hours if they are not reviewed. Incorrect code submissions are limited, and request creation is rate-limited.
+
+Because this installation has no registered out-of-band channel, code handoff depends on in-person identity verification. Do not approve a request or provide its code based only on the email address in the request. The code is delivered to the authenticated MIS Admin browser only after approval, so it is visible in that approval response; do not copy it into messages, logs, or screenshots.
 
 ## Face Recognition / IoT
 

@@ -243,6 +243,8 @@ tbody tr:hover { background: rgba(34, 67, 50, 0.03); }
 }
 
 .btn-icon:hover { transform: scale(1.15); }
+.btn-icon.edit { color: var(--icon-edit); }
+.btn-icon.delete { color: var(--icon-delete); }
 .btn-icon.edit svg { fill: var(--icon-edit); }
 .btn-icon.delete svg { fill: var(--icon-delete); }
 

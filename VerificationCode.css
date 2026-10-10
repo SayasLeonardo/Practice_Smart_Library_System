@@ -81,6 +81,19 @@ h1 {
     margin-bottom: 40px;
 }
 
+#recovery-status,
+.verification-container > p {
+    color: #1e3f2e;
+    font-size: 14px;
+    line-height: 1.5;
+    margin: 0 0 14px;
+    text-align: center;
+}
+
+.verification-container > p + p {
+    margin-bottom: 22px;
+}
+
 
 /* Verification Code */
 
@@ -105,6 +118,12 @@ h1 {
     font-weight: 600;
 
     outline: none;
+}
+
+.code-container input:disabled,
+.confirm-button:disabled {
+    cursor: not-allowed;
+    opacity: .55;
 }
 
 .code-container input:focus {

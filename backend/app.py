@@ -1,21 +1,26 @@
 """Flask API and static-file server for the Smart Library System."""
 
+import hashlib
+import hmac
+import json
+import math
 import os
 import re
 import secrets
 import sqlite3
-import hmac
-import json
-import math
 from datetime import date, datetime, timedelta
 from functools import wraps
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, abort, g, jsonify, redirect, request, send_from_directory, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from database import DATABASE_PATH, get_connection, initialize_database
+try:
+    from database import DATABASE_PATH, get_connection, initialize_database
+except ModuleNotFoundError:  # pragma: no cover - supports running from repo root
+    from backend.database import DATABASE_PATH, get_connection, initialize_database
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -101,6 +106,44 @@ def clean_text(data, field, maximum=200):
     return value
 
 
+def recovery_secret_hash(value):
+    secret = app.config["SECRET_KEY"].encode("utf-8")
+    return hmac.new(secret, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def recovery_audit(connection, request_id, action, actor_id=None):
+    connection.execute(
+        "INSERT INTO password_recovery_audit (request_id, actor_id, action, created_at) VALUES (?, ?, ?, ?)",
+        (request_id, actor_id, action, manila_now()),
+    )
+
+
+def consume_recovery_rate_limit(connection, action, key, limit, window_seconds):
+    now = datetime.now(MANILA_TIME)
+    window_start = datetime.fromtimestamp(
+        int(now.timestamp()) // window_seconds * window_seconds,
+        MANILA_TIME,
+    ).isoformat(timespec="seconds")
+    key_hash = recovery_secret_hash(key)
+    connection.execute(
+        """INSERT INTO password_recovery_rate_limits (action, key_hash, window_start, attempts)
+           VALUES (?, ?, ?, 1)
+           ON CONFLICT(action, key_hash, window_start)
+           DO UPDATE SET attempts = attempts + 1""",
+        (action, key_hash, window_start),
+    )
+    count = connection.execute(
+        """SELECT attempts FROM password_recovery_rate_limits
+           WHERE action = ? AND key_hash = ? AND window_start = ?""",
+        (action, key_hash, window_start),
+    ).fetchone()["attempts"]
+    connection.execute(
+        "DELETE FROM password_recovery_rate_limits WHERE window_start < ?",
+        ((now - timedelta(days=1)).isoformat(timespec="seconds"),),
+    )
+    return count <= limit
+
+
 def transaction_rows(search="", date_from="", date_to=""):
     try:
         if date_from:
@@ -114,17 +157,22 @@ def transaction_rows(search="", date_from="", date_to=""):
 
     sql = """
         SELECT t.id, t.book_id, t.borrower_id, b.book_number, t.barcode, b.title,
-               u.school_id AS borrower_school_id, u.name AS borrower_name,
-               u.department AS borrower_department, t.institutional_email AS borrower_email,
-               staff.name AS processed_by, t.borrow_date, t.due_date, t.return_date,
+               COALESCE(NULLIF(t.borrower_school_id, ''), u.school_id, '') AS borrower_school_id,
+               COALESCE(NULLIF(t.borrower_name, ''), u.name, '') AS borrower_name,
+               COALESCE(NULLIF(t.borrower_department, ''), u.department, '') AS borrower_department,
+               t.institutional_email AS borrower_email,
+               COALESCE(NULLIF(t.processor_name, ''), staff.name, '') AS processed_by,
+               t.borrow_date, t.due_date, t.return_date,
                t.status,
             CASE WHEN t.status = 'borrowed' AND t.due_date < ?
                     THEN 'overdue' ELSE t.status END AS display_status
         FROM book_transactions t
         JOIN books b ON b.id = t.book_id
-        JOIN users u ON u.id = t.borrower_id
-        JOIN users staff ON staff.id = t.processed_by
-        WHERE (b.title LIKE ? OR b.book_number LIKE ? OR b.barcode LIKE ? OR u.name LIKE ? OR u.school_id LIKE ?)
+        LEFT JOIN users u ON u.id = t.borrower_id
+        LEFT JOIN users staff ON staff.id = t.processed_by
+        WHERE (b.title LIKE ? OR b.book_number LIKE ? OR b.barcode LIKE ?
+               OR COALESCE(NULLIF(t.borrower_name, ''), u.name, '') LIKE ?
+               OR COALESCE(NULLIF(t.borrower_school_id, ''), u.school_id, '') LIKE ?)
     """
     search_term = f"%{search}%"
     parameters = [manila_now()[:10], search_term, search_term, search_term, search_term, search_term]
@@ -159,17 +207,21 @@ def attendance_rows(search="", date_from="", date_to="", role="", department="",
         raise ValueError("Choose all attendance, Time-in, or Time-out records.")
 
     sql = """
-        SELECT a.id, u.id AS person_id, u.school_id, u.name,
-               COALESCE(NULLIF(u.person_type, ''), u.role) AS role,
-               u.department, a.attendance_date, a.time_in, a.time_out, a.source,
+        SELECT a.id, u.id AS person_id,
+               COALESCE(NULLIF(a.person_school_id, ''), u.school_id, '') AS school_id,
+               COALESCE(NULLIF(a.person_name, ''), u.name, '') AS name,
+               COALESCE(NULLIF(a.person_role, ''), NULLIF(u.person_type, ''), u.role, '') AS role,
+               COALESCE(NULLIF(a.person_department, ''), u.department, '') AS department,
+               a.attendance_date, a.time_in, a.time_out, a.source,
                CASE a.status WHEN 'admin_closed' THEN 'Closed by Admin'
                     WHEN 'inside' THEN 'Inside' ELSE 'Completed' END AS status
         FROM attendance_records a
-        JOIN users u ON u.id = a.person_id
-        WHERE (u.school_id LIKE ? OR u.name LIKE ?)
-          AND (? = '' OR COALESCE(NULLIF(u.person_type, ''), u.role) = ?)
-          AND (? = '' OR u.department LIKE ?)
-          AND u.role NOT IN ('MIS Admin', 'Librarian')
+        LEFT JOIN users u ON u.id = a.person_id
+        WHERE (COALESCE(a.person_school_id, u.school_id, '') LIKE ?
+               OR COALESCE(a.person_name, u.name, '') LIKE ?)
+          AND (? = '' OR COALESCE(NULLIF(a.person_role, ''), NULLIF(u.person_type, ''), u.role, '') = ?)
+          AND (? = '' OR COALESCE(a.person_department, u.department, '') LIKE ?)
+          AND (u.id IS NULL OR u.role NOT IN ('MIS Admin', 'Librarian'))
     """
     search_term = f"%{search}%"
     parameters = [search_term, search_term, role, role, f"%{department}%" if department else "", f"%{department}%" if department else ""]
@@ -255,6 +307,339 @@ def change_password():
         connection.execute("UPDATE users SET password_hash = ? WHERE id = ?", (generate_password_hash(password), g.user["id"]))
     session.clear()
     return jsonify({"message": "Password updated. Please log in again."})
+
+
+@app.post("/api/auth/recovery/request")
+def request_recovery():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+    if not email or len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return api_error("Enter a valid institutional email address.")
+    access_key = secrets.token_urlsafe(32)
+    response_message = "If eligible, your recovery request is submitted for MIS Admin review."
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if not consume_recovery_rate_limit(
+            connection, "request", request.remote_addr or "unknown", 5, 3600
+        ):
+            return api_error("Too many recovery requests. Please try again later.", 429)
+        user = connection.execute(
+            "SELECT id, email, role, status FROM users WHERE lower(email) = ? AND role = 'Librarian' AND status = 'active'",
+            (email,),
+        ).fetchone()
+        if not user:
+            return jsonify({
+                "message": response_message,
+                "request_key": access_key,
+            })
+        active = connection.execute(
+            """SELECT id, status, expires_at FROM password_recovery_requests
+               WHERE user_id = ? AND status IN ('pending', 'approved')
+               ORDER BY requested_at DESC LIMIT 1""",
+            (user["id"],),
+        ).fetchone()
+        now = datetime.now(MANILA_TIME)
+        if active and datetime.fromisoformat(active["expires_at"]) <= now:
+            connection.execute(
+                """UPDATE password_recovery_requests
+                   SET status = 'expired', reviewed_at = ?, code_hash = '', reset_token_hash = NULL
+                   WHERE id = ?""",
+                (manila_now(), active["id"]),
+            )
+            recovery_audit(connection, active["id"], "expired")
+            active = None
+        if active:
+            access_key = secrets.token_urlsafe(32)
+            connection.execute(
+                "UPDATE password_recovery_requests SET token_hash = ? WHERE id = ?",
+                (recovery_secret_hash(access_key), active["id"]),
+            )
+            recovery_audit(connection, active["id"], "request_revisited")
+            return jsonify({
+                "message": response_message,
+                "request_key": access_key,
+            })
+        expires_at = (now + timedelta(hours=24)).isoformat(timespec="seconds")
+        cursor = connection.execute(
+            """INSERT INTO password_recovery_requests
+               (user_id, email, code_hash, token_hash, status, requested_at, expires_at)
+               VALUES (?, ?, '', ?, 'pending', ?, ?)""",
+            (user["id"], user["email"], recovery_secret_hash(access_key), manila_now(), expires_at),
+        )
+        recovery_audit(connection, cursor.lastrowid, "requested")
+        return jsonify({
+            "message": response_message,
+            "request_key": access_key,
+        })
+
+
+@app.post("/api/auth/recovery/status")
+def get_recovery_status():
+    data = request.get_json(silent=True) or {}
+    request_key = str(data.get("request_key", "")).strip()
+    if not request_key or len(request_key) > 200:
+        return api_error("Recovery request is unavailable.", 404)
+    with get_connection() as connection:
+        row = connection.execute(
+            """SELECT pr.id, pr.status, pr.expires_at, pr.verified_at,
+                      pr.verify_attempts, u.status AS user_status, u.role
+               FROM password_recovery_requests pr
+               JOIN users u ON u.id = pr.user_id
+               WHERE pr.token_hash = ?""",
+            (recovery_secret_hash(request_key),),
+        ).fetchone()
+        if not row or row["role"] != "Librarian" or row["user_status"] != "active":
+            return jsonify({"status": "pending", "expires_at": None, "verified": False})
+        status = row["status"]
+        if status in ("pending", "approved") and datetime.fromisoformat(row["expires_at"]) <= datetime.now(MANILA_TIME):
+            connection.execute(
+                """UPDATE password_recovery_requests
+                   SET status = 'expired', reviewed_at = ?, code_hash = '', reset_token_hash = NULL
+                   WHERE id = ? AND status IN ('pending', 'approved')""",
+                (manila_now(), row["id"]),
+            )
+            recovery_audit(connection, row["id"], "expired")
+            status = "expired"
+        return jsonify({
+            "status": "verified" if row["verified_at"] and status == "approved" else status,
+            "expires_at": row["expires_at"] if status == "approved" else None,
+            "verified": bool(row["verified_at"]),
+        })
+
+
+@app.get("/api/auth/recovery/requests")
+@roles_required("MIS Admin")
+def list_recovery_requests():
+    with get_connection() as connection:
+        rows = connection.execute(
+            """SELECT pr.id, pr.user_id, COALESCE(u.name, 'Deleted Librarian') AS librarian_name,
+                      pr.email, pr.status,
+                      pr.requested_at, pr.expires_at, pr.approved_by, approver.name AS approved_by_name,
+                      pr.approved_at, pr.reviewed_at, pr.used_at
+               FROM password_recovery_requests pr
+               LEFT JOIN users u ON u.id = pr.user_id
+               LEFT JOIN users approver ON approver.id = pr.approved_by
+               WHERE u.role = 'Librarian' OR pr.user_id IS NULL
+               ORDER BY CASE pr.status WHEN 'pending' THEN 0 ELSE 1 END, pr.requested_at DESC
+               LIMIT 100""",
+        ).fetchall()
+        for row in rows:
+            if row["status"] in ("pending", "approved") and datetime.fromisoformat(row["expires_at"]) <= datetime.now(MANILA_TIME):
+                connection.execute(
+                    """UPDATE password_recovery_requests
+                       SET status = 'expired', reviewed_at = ?, code_hash = '', reset_token_hash = NULL
+                       WHERE id = ? AND status IN ('pending', 'approved')""",
+                    (manila_now(), row["id"]),
+                )
+                recovery_audit(connection, row["id"], "expired")
+    with get_connection() as connection:
+        rows = connection.execute(
+            """SELECT pr.id, pr.user_id, COALESCE(u.name, 'Deleted Librarian') AS librarian_name,
+                      pr.email, pr.status,
+                      pr.requested_at, pr.expires_at, pr.approved_by, approver.name AS approved_by_name,
+                      pr.approved_at, pr.reviewed_at, pr.used_at
+               FROM password_recovery_requests pr
+               LEFT JOIN users u ON u.id = pr.user_id
+               LEFT JOIN users approver ON approver.id = pr.approved_by
+               WHERE u.role = 'Librarian' OR pr.user_id IS NULL
+               ORDER BY CASE pr.status WHEN 'pending' THEN 0 ELSE 1 END, pr.requested_at DESC
+               LIMIT 100"""
+        ).fetchall()
+    return jsonify({"requests": [dict(row) for row in rows]})
+
+
+@app.post("/api/auth/recovery/approve")
+@roles_required("MIS Admin")
+def approve_recovery_request():
+    data = request.get_json(silent=True) or {}
+    request_id = data.get("request_id")
+    decision = str(data.get("decision", "approve")).strip().lower()
+    if not isinstance(request_id, int) or request_id < 1:
+        return api_error("Recovery request ID is required.")
+    if decision not in ("approve", "reject"):
+        return api_error("Decision must be approve or reject.")
+    recovery_code = f"{secrets.randbelow(1000000):06d}" if decision == "approve" else None
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if not consume_recovery_rate_limit(
+            connection, "review", str(g.user["id"]), 30, 3600
+        ):
+            return api_error("Too many recovery decisions. Please try again later.", 429)
+        request_row = connection.execute(
+            """SELECT pr.id, pr.user_id, pr.email, pr.status, pr.expires_at, u.name AS librarian_name,
+                      u.status AS user_status
+               FROM password_recovery_requests pr
+               JOIN users u ON u.id = pr.user_id
+               WHERE pr.id = ? AND u.role = 'Librarian'""",
+            (request_id,),
+        ).fetchone()
+        if not request_row:
+            return api_error("Recovery request not found.", 404)
+        if request_row["status"] != "pending":
+            return api_error("This recovery request has already been processed.", 409)
+        if request_row["user_status"] != "active" or datetime.fromisoformat(request_row["expires_at"]) <= datetime.now(MANILA_TIME):
+            connection.execute(
+                """UPDATE password_recovery_requests SET status = 'expired', approved_by = ?,
+                   reviewed_at = ?, code_hash = '', reset_token_hash = NULL WHERE id = ?""",
+                (g.user["id"], manila_now(), request_row["id"]),
+            )
+            recovery_audit(connection, request_row["id"], "expired", g.user["id"])
+            return api_error("This recovery request has expired or the account is inactive.", 410)
+        timestamp = manila_now()
+        if decision == "approve":
+            expires_at = (datetime.now(MANILA_TIME) + timedelta(minutes=15)).isoformat(timespec="seconds")
+            connection.execute(
+                """UPDATE password_recovery_requests
+                   SET status = 'approved', code_hash = ?, reset_token_hash = NULL, verify_attempts = 0,
+                       verified_at = NULL, approved_by = ?, approved_at = ?, reviewed_at = ?, expires_at = ?
+                   WHERE id = ? AND status = 'pending'""",
+                (
+                recovery_secret_hash(recovery_code),
+                    g.user["id"], timestamp, timestamp, expires_at, request_row["id"],
+                ),
+            )
+            recovery_audit(connection, request_row["id"], "approved", g.user["id"])
+            return jsonify({
+                "message": "Approved. Verify the Librarian in person and privately provide this one-time code.",
+                "request_id": request_row["id"],
+                "recovery_code": recovery_code,
+                "expires_at": expires_at,
+            })
+        connection.execute(
+            """UPDATE password_recovery_requests
+               SET status = 'rejected', code_hash = '', reset_token_hash = NULL,
+                   approved_by = ?, approved_at = ?, reviewed_at = ?
+               WHERE id = ? AND status = 'pending'""",
+            (g.user["id"], timestamp, timestamp, request_row["id"]),
+        )
+        recovery_audit(connection, request_row["id"], "rejected", g.user["id"])
+        return jsonify({"message": "Recovery request rejected.", "request_id": request_row["id"]})
+
+
+@app.post("/api/auth/recovery/verify")
+def verify_recovery_code():
+    data = request.get_json(silent=True) or {}
+    request_key = str(data.get("request_key", "")).strip()
+    code = str(data.get("code", "")).strip()
+    if not request_key or not re.fullmatch(r"\d{6}", code):
+        return api_error("Enter the six-digit code provided by the MIS Admin.")
+    reset_token = secrets.token_urlsafe(32)
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if not consume_recovery_rate_limit(
+            connection, "verify", request_key, 5, 900
+        ):
+            return api_error("Too many verification attempts. Start a new recovery request later.", 429)
+        request_row = connection.execute(
+            """SELECT pr.id, pr.user_id, pr.code_hash, pr.status, pr.expires_at,
+                      pr.verified_at, pr.verify_attempts, u.role, u.status AS user_status
+               FROM password_recovery_requests pr
+               JOIN users u ON u.id = pr.user_id
+               WHERE pr.token_hash = ?""",
+            (recovery_secret_hash(request_key),),
+        ).fetchone()
+        if not request_row or request_row["role"] != "Librarian" or request_row["user_status"] != "active":
+            return api_error("Recovery request is unavailable.", 404)
+        if request_row["status"] != "approved":
+            return api_error("This recovery request is not approved or is no longer active.", 409)
+        if request_row["verified_at"]:
+            return api_error("This verification code has already been used.", 409)
+        if datetime.fromisoformat(request_row["expires_at"]) <= datetime.now(MANILA_TIME):
+            connection.execute(
+                """UPDATE password_recovery_requests
+                   SET status = 'expired', reviewed_at = ?, code_hash = '', reset_token_hash = NULL
+                   WHERE id = ?""",
+                (manila_now(), request_row["id"]),
+            )
+            recovery_audit(connection, request_row["id"], "expired")
+            return api_error("This recovery code has expired. Start a new request for MIS Admin approval.", 410)
+        expected_hash = recovery_secret_hash(code)
+        if not hmac.compare_digest(request_row["code_hash"], expected_hash):
+            attempts = request_row["verify_attempts"] + 1
+            if attempts >= 5:
+                connection.execute(
+                    """UPDATE password_recovery_requests
+                       SET status = 'expired', verify_attempts = ?, reviewed_at = ?, code_hash = ''
+                       WHERE id = ? AND status = 'approved'""",
+                    (attempts, manila_now(), request_row["id"]),
+                )
+                recovery_audit(connection, request_row["id"], "verification_locked")
+            else:
+                connection.execute(
+                    "UPDATE password_recovery_requests SET verify_attempts = ? WHERE id = ? AND status = 'approved'",
+                    (attempts, request_row["id"]),
+                )
+                recovery_audit(connection, request_row["id"], "verification_failed")
+            return api_error("The recovery code is invalid.", 401)
+        timestamp = manila_now()
+        connection.execute(
+            """UPDATE password_recovery_requests
+               SET verified_at = ?, reset_token_hash = ?, code_hash = ''
+               WHERE id = ? AND status = 'approved' AND verified_at IS NULL""",
+            (timestamp, recovery_secret_hash(reset_token), request_row["id"]),
+        )
+        recovery_audit(connection, request_row["id"], "verified")
+        return jsonify({
+            "message": "Code verified. You may now set a new password.",
+            "reset_token": reset_token,
+        })
+
+
+@app.post("/api/auth/recovery/reset")
+def reset_password_from_recovery():
+    data = request.get_json(silent=True) or {}
+    request_key = str(data.get("request_key", "")).strip()
+    reset_token = str(data.get("reset_token", "")).strip()
+    password = str(data.get("newPassword", ""))
+    confirmation = str(data.get("confirmPassword", ""))
+    if not request_key or not reset_token or not password or not confirmation:
+        return api_error("The verified recovery session and both password fields are required.")
+    if len(password) < 8:
+        return api_error("Password must be at least 8 characters long.")
+    if password != confirmation:
+        return api_error("The passwords do not match.")
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        request_row = connection.execute(
+            """SELECT pr.id, pr.user_id, pr.status, pr.expires_at, pr.verified_at,
+                      pr.reset_token_hash, u.role, u.status AS user_status
+               FROM password_recovery_requests pr
+               JOIN users u ON u.id = pr.user_id
+               WHERE pr.token_hash = ?""",
+            (recovery_secret_hash(request_key),),
+        ).fetchone()
+        if (not request_row or request_row["role"] != "Librarian"
+                or request_row["user_status"] != "active" or request_row["status"] != "approved"
+                or not request_row["verified_at"] or not request_row["reset_token_hash"]
+                or not hmac.compare_digest(
+                    request_row["reset_token_hash"], recovery_secret_hash(reset_token)
+                )):
+            return api_error("A verified, active recovery session is required.", 401)
+        if datetime.fromisoformat(request_row["expires_at"]) <= datetime.now(MANILA_TIME):
+            connection.execute(
+                """UPDATE password_recovery_requests
+                   SET status = 'expired', reviewed_at = ?, reset_token_hash = NULL
+                   WHERE id = ?""",
+                (manila_now(), request_row["id"]),
+            )
+            recovery_audit(connection, request_row["id"], "expired")
+            return api_error("This recovery request has expired.", 410)
+        user_update = connection.execute(
+            """UPDATE users SET password_hash = ?
+               WHERE id = ? AND role = 'Librarian' AND status = 'active'""",
+            (generate_password_hash(password), request_row["user_id"]),
+        )
+        if user_update.rowcount != 1:
+            return api_error("The Librarian account is no longer active.", 409)
+        connection.execute(
+            """UPDATE password_recovery_requests
+               SET status = 'completed', used_at = ?, reviewed_at = ?, reset_token_hash = NULL,
+                   code_hash = ''
+               WHERE id = ? AND status = 'approved' AND verified_at IS NOT NULL""",
+            (manila_now(), manila_now(), request_row["id"]),
+        )
+        recovery_audit(connection, request_row["id"], "completed", request_row["user_id"])
+    return jsonify({"message": "Password reset complete. Please log in with your new password."})
 
 
 @app.get("/api/books")
@@ -556,7 +941,8 @@ def borrow_book():
                     (book_id,),
                 ).fetchone()
             borrower = connection.execute(
-                "SELECT id, email FROM users WHERE school_id = ? AND status = 'active' AND role IN ('Student', 'Faculty')",
+                """SELECT id, school_id, name, email, department FROM users
+                   WHERE school_id = ? AND status = 'active' AND role IN ('Student', 'Faculty')""",
                 (school_id,),
             ).fetchone()
             if not book:
@@ -569,9 +955,13 @@ def borrow_book():
                 return api_error("There are no available copies of this book.", 409)
             connection.execute(
                 """INSERT INTO book_transactions
-                   (book_id, borrower_id, processed_by, barcode, institutional_email, borrow_date, due_date)
-                   VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'), ?)""",
-                (book["id"], borrower["id"], g.user["id"], book["barcode"], institutional_email, due_date),
+                   (book_id, borrower_id, processed_by, borrower_school_id, borrower_name,
+                    borrower_department, processor_school_id, processor_name, processor_department,
+                    barcode, institutional_email, borrow_date, due_date)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), ?)""",
+                (book["id"], borrower["id"], g.user["id"], borrower["school_id"], borrower["name"],
+                 borrower["department"], g.user["school_id"], g.user["name"], g.user["department"],
+                 book["barcode"], institutional_email, due_date),
             )
             connection.execute("UPDATE books SET available_quantity = available_quantity - 1 WHERE id = ?", (book["id"],))
         return jsonify({"message": "Book borrowed."}), 201
@@ -631,20 +1021,21 @@ def dashboard_data():
 def book_activity_rows(overdue_only=False):
     today = manila_now()[:10]
     sql = """
-        SELECT t.id, u.school_id, u.name AS borrower_name, b.barcode, b.title,
+        SELECT t.id, COALESCE(NULLIF(t.borrower_school_id, ''), u.school_id, '') AS school_id,
+               COALESCE(NULLIF(t.borrower_name, ''), u.name, '') AS borrower_name, b.barcode, b.title,
                t.borrow_date, t.due_date,
                CAST(julianday(?) - julianday(date(t.due_date)) AS INTEGER) AS days_overdue,
                CASE WHEN date(t.due_date) < ? THEN 'Overdue' ELSE 'Borrowed' END AS status
         FROM book_transactions t
         JOIN books b ON b.id = t.book_id
-        JOIN users u ON u.id = t.borrower_id
+        LEFT JOIN users u ON u.id = t.borrower_id
         WHERE t.status = 'borrowed'
     """
     parameters = [today, today]
     if overdue_only:
         sql += " AND date(t.due_date) < ?"
         parameters.append(today)
-    sql += " ORDER BY t.due_date, u.name COLLATE NOCASE"
+    sql += " ORDER BY t.due_date, borrower_name COLLATE NOCASE"
     with get_connection() as connection:
         return [dict(row) for row in connection.execute(sql, parameters).fetchall()]
 
@@ -711,9 +1102,12 @@ def attendance_api_response(event_type):
             if active:
                 return api_error("This person already has an active Time-in.", 409)
             connection.execute(
-                """INSERT INTO attendance_records (person_id, time_in, attendance_date, source, status)
-                   VALUES (?, ?, ?, 'face_recognition', 'inside')""",
-                (person["id"], timestamp, timestamp[:10]),
+                """INSERT INTO attendance_records
+                   (person_id, person_school_id, person_name, person_role, person_department,
+                    time_in, attendance_date, source, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'face_recognition', 'inside')""",
+                (person["id"], person["school_id"], person["name"], person["person_type"] or person["role"],
+                 person["department"], timestamp, timestamp[:10]),
             )
         else:
             if not active:
@@ -753,6 +1147,16 @@ def list_attendance():
 @roles_required("MIS Admin", "Librarian")
 def attendance_report():
     return list_attendance()
+
+
+@app.delete("/api/attendance/<int:attendance_id>")
+@roles_required("MIS Admin")
+def delete_attendance_record(attendance_id):
+    with get_connection() as connection:
+        cursor = connection.execute("DELETE FROM attendance_records WHERE id = ?", (attendance_id,))
+        if not cursor.rowcount:
+            return api_error("Attendance record not found.", 404)
+    return jsonify({"message": "Attendance history record deleted."})
 
 
 @app.post("/api/attendance/time-in")
@@ -892,6 +1296,37 @@ def deactivate_user(user_id):
     return jsonify({"message": "User deactivated."})
 
 
+def delete_user_preserving_history(connection, user_id):
+    recovery_rows = connection.execute(
+        """SELECT id FROM password_recovery_requests
+           WHERE user_id = ? AND status IN ('pending', 'approved')""",
+        (user_id,),
+    ).fetchall()
+    for recovery_row in recovery_rows:
+        connection.execute(
+            """UPDATE password_recovery_requests
+               SET status = 'expired', code_hash = '', token_hash = NULL,
+                   reset_token_hash = NULL, reviewed_at = ?
+               WHERE id = ?""",
+            (manila_now(), recovery_row["id"]),
+        )
+        recovery_audit(connection, recovery_row["id"], "account_deleted", g.user["id"])
+    connection.execute(
+        "UPDATE book_transactions SET borrower_id = NULL WHERE borrower_id = ?",
+        (user_id,),
+    )
+    connection.execute(
+        "UPDATE book_transactions SET processed_by = NULL WHERE processed_by = ?",
+        (user_id,),
+    )
+    connection.execute(
+        "UPDATE attendance_records SET person_id = NULL WHERE person_id = ?",
+        (user_id,),
+    )
+    cursor = connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return cursor.rowcount > 0
+
+
 def person_role_expression():
     return "COALESCE(NULLIF(person_type, ''), role)"
 
@@ -1012,6 +1447,24 @@ def deactivate_person(person_id):
             (timestamp, person_id),
         )
     return jsonify({"message": "Person deactivated. Any open attendance session was closed by an administrator."})
+
+
+@app.delete("/api/people/<int:person_id>/permanent")
+@roles_required("MIS Admin")
+def permanently_delete_person(person_id):
+    with get_connection() as connection:
+        person = connection.execute(
+            "SELECT role, status, face_image FROM users WHERE id = ?", (person_id,)
+        ).fetchone()
+        if not person or person["role"] in ("MIS Admin", "Librarian"):
+            return api_error("People record not found.", 404)
+        if person["status"] != "inactive":
+            return api_error("Deactivate the person before permanently deleting the record.", 409)
+        if not delete_user_preserving_history(connection, person_id):
+            return api_error("People record not found.", 404)
+    if person["face_image"] and Path(person["face_image"]).name == person["face_image"]:
+        (FACE_DIRECTORY / person["face_image"]).unlink(missing_ok=True)
+    return jsonify({"message": "People information permanently deleted."})
 
 
 def uploaded_face_extension(image_data):
@@ -1144,6 +1597,24 @@ def deactivate_system_user(user_id):
     return deactivate_user(user_id)
 
 
+@app.delete("/api/system-users/<int:user_id>/permanent")
+@roles_required("MIS Admin")
+def permanently_delete_system_user(user_id):
+    if user_id == g.user["id"]:
+        return api_error("You cannot delete your own account.", 409)
+    with get_connection() as connection:
+        user = connection.execute(
+            "SELECT role, status FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not user or user["role"] not in ("MIS Admin", "Librarian"):
+            return api_error("System account not found.", 404)
+        if user["status"] != "inactive":
+            return api_error("Deactivate the system account before permanently deleting it.", 409)
+        if not delete_user_preserving_history(connection, user_id):
+            return api_error("System account not found.", 404)
+    return jsonify({"message": "System account permanently deleted."})
+
+
 @app.get("/api/iot/face-enrollments")
 @iot_required
 def iot_face_enrollments():
@@ -1240,10 +1711,8 @@ def frontend_files(requested_path):
             return redirect("/LogIn.html" if not role else "/MIS_ADMIN/dashboard.html")
         if role and normalized == "LogIn.html":
             return redirect("/MIS_ADMIN/dashboard.html" if role == "MIS Admin" else "/LIBRARIAN/dashboard.html")
-        if normalized in {"LogIn.html", "welcome.html", "EmailVerification.html", "VerificationCode.html"}:
+        if normalized in {"LogIn.html", "welcome.html", "EmailVerification.html", "VerificationCode.html", "ChangePassword.html"}:
             return send_from_directory(PROJECT_ROOT, requested_path)
-        if normalized in {"ChangePassword.html"} and not role:
-            return redirect("/LogIn.html")
     return send_from_directory(PROJECT_ROOT, requested_path)
 
 
