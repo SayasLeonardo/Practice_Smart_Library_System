@@ -39,7 +39,7 @@ def seed_required_staff_accounts(connection):
             "school_id": "LIB-001",
             "name": "PTC Librarian",
             "email": "librarian@paterostechnologicalcollege.edu.ph",
-            "password": "library01",
+            "password": "library123",
             "role": "Librarian",
             "department": "Library",
         },

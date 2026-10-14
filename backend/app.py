@@ -15,6 +15,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, abort, g, jsonify, redirect, request, send_from_directory, session
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
@@ -22,13 +23,13 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - supports running from repo root
     from backend.database import DATABASE_PATH, get_connection, initialize_database
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COVER_DIRECTORY = Path(__file__).resolve().parent / "uploads" / "book_covers"
 FACE_DIRECTORY = Path(__file__).resolve().parent / "uploads" / "person_faces"
 MAX_COVER_SIZE = 5 * 1024 * 1024
 MANILA_TIME = ZoneInfo("Asia/Manila")
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 app.config.update(
     SECRET_KEY=os.environ.get("SMART_LIBRARY_SECRET", "local-development-key-change-before-deployment"),
     SESSION_COOKIE_HTTPONLY=True,
@@ -38,10 +39,8 @@ app.config.update(
 )
 initialize_database()
 
-
 def api_error(message, status=400):
     return jsonify({"error": message}), status
-
 
 def signed_in_user():
     user_id = session.get("user_id")
@@ -55,11 +54,9 @@ def signed_in_user():
         ).fetchone()
     return dict(user) if user else None
 
-
 @app.before_request
 def load_signed_in_user():
     g.user = signed_in_user()
-
 
 def login_required(handler):
     @wraps(handler)
@@ -69,7 +66,6 @@ def login_required(handler):
         return handler(*args, **kwargs)
 
     return wrapped
-
 
 def roles_required(*roles):
     def decorate(handler):
@@ -1728,4 +1724,4 @@ def handle_large_upload(error):
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "5000")), debug=os.environ.get("FLASK_DEBUG") == "1")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=os.environ.get("FLASK_DEBUG") == "1")
